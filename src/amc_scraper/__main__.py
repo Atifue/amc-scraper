@@ -15,7 +15,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Print AMC showtimes for Fresh Meadows and Bay Terrace")
     parser.add_argument(
         "--theater",
-        choices=["both", "fresh-meadows", "bay-terrace"],
+        choices=["both", *[theatre.key for theatre in THEATRES]],
         default="both",
     )
     parser.add_argument("--date", help="YYYY-MM-DD (defaults to today in America/New_York)")

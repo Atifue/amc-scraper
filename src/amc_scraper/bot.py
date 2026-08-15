@@ -17,8 +17,7 @@ log = logging.getLogger(__name__)
 
 THEATER_CHOICES = [
     app_commands.Choice(name="Both", value="both"),
-    app_commands.Choice(name="Fresh Meadows 7", value="fresh-meadows"),
-    app_commands.Choice(name="Bay Terrace 6", value="bay-terrace"),
+    *[app_commands.Choice(name=theatre.name, value=theatre.key) for theatre in THEATRES],
 ]
 
 
@@ -96,7 +95,7 @@ class ShowtimesBot(commands.Bot):
 
 @app_commands.command(
     name="showtimes",
-    description="List movies playing at AMC Fresh Meadows 7 and/or AMC Bay Terrace 6",
+    description="List movies playing at the configured AMC theaters",
 )
 @app_commands.describe(
     theater="Which theater to list (defaults to both)",

@@ -7,6 +7,7 @@ FRESH_MEADOWS = Theatre(
     slug="freshmeadows",
     fandango_id="aabtm",
     amc_slug="amc-fresh-meadows-7",
+    fandango_slug="amc-loews-fresh-meadows-7",
 )
 
 BAY_TERRACE = Theatre(
@@ -16,6 +17,7 @@ BAY_TERRACE = Theatre(
     slug="bayterrace",
     fandango_id="aabqj",
     amc_slug="amc-bay-terrace-6",
+    fandango_slug="amc-loews-bay-terrace-6",
 )
 
 THEATRES: tuple[Theatre, ...] = (FRESH_MEADOWS, BAY_TERRACE)

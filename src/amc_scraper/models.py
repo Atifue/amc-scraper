@@ -10,6 +10,7 @@ class Theatre:
     slug: str
     fandango_id: str
     amc_slug: str
+    fandango_slug: str | None = None
     amc_id: int | None = None
     timezone: str = "America/New_York"
 

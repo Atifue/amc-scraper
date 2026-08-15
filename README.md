@@ -74,7 +74,101 @@ Keep that process running. Slash commands need a connected gateway, and the dail
 
 | Option | Meaning |
 | --- | --- |
-| `theater` | Fresh Meadows 7, Bay Terrace 6, or both (default) |
+| `theater` | One configured theater, or both (default: all of them) |
 | `date` | `YYYY-MM-DD` (defaults to today in `America/New_York`) |
 
-The daily post always includes both theaters.
+The daily post always includes every theater in [`src/amc_scraper/theatres.py`](src/amc_scraper/theatres.py).
+
+## Change or add theaters
+
+Theater list lives in [`src/amc_scraper/theatres.py`](src/amc_scraper/theatres.py). The `/showtimes` menu, CLI `--theater` flag, and daily post all read from `THEATRES` there.
+
+### Replace one of the current theaters
+
+Edit the `Theatre(...)` block you want to change, then leave it in the `THEATRES` tuple.
+
+### Add another theater
+
+1. Open the AMC showtimes page, for example  
+   `https://www.amctheatres.com/movie-theatres/new-york-city/amc-fresh-meadows-7/showtimes`  
+   The path after `/movie-theatres/` is `path` (`new-york-city/amc-fresh-meadows-7`). The last segment is `amc_slug`.
+2. Open the same theater on Fandango. The URL looks like  
+   `https://www.fandango.com/amc-loews-fresh-meadows-7-aabtm/theater-page`  
+   `fandango_slug` is the name (`amc-loews-fresh-meadows-7`) and `fandango_id` is the short code (`aabtm`).
+3. Add a `Theatre(...)` and append it to `THEATRES`:
+
+```python
+LINCOLN_SQUARE = Theatre(
+    key="lincoln-square",
+    name="AMC Lincoln Square 13",
+    path="new-york-city/amc-lincoln-square-13",
+    slug="lincolnsquare",
+    fandango_id="AABCD",
+    amc_slug="amc-lincoln-square-13",
+    fandango_slug="amc-lincoln-square-13",
+)
+
+THEATRES: tuple[Theatre, ...] = (FRESH_MEADOWS, BAY_TERRACE, LINCOLN_SQUARE)
+```
+
+`key` is the CLI / slash-command value (`./showtimes --theater lincoln-square`). Discord allows at most 25 slash-command choices, including **Both**.
+
+Restart the bot after editing (`sudo systemctl restart amc-bot` on the VM).
+
+## Run 24/7 on a free GCP VM
+
+`./bot` only stays online while that process is running. Cloud Run / Cloud Functions will not work well here: the bot needs a persistent Discord websocket.
+
+The fit for a free GCP account is **one always-free Compute Engine `e2-micro` VM**:
+
+- Region must be `us-west1`, `us-central1`, or `us-east1`
+- 1 non-preemptible `e2-micro` per month (enough hours to run 24/7)
+- You still need a billing account (credit card). Set a **budget alert at $1** so a wrong VM size cannot surprise you
+- Skip `playwright install chromium` on this VM. The usual Fandango HTTP path does not need a browser, and Chromium will not fit comfortably in 1 GB RAM
+
+### 1. Create the VM
+
+In [Google Cloud Console](https://console.cloud.google.com/):
+
+1. Create a project and enable billing.
+2. Compute Engine → VM instances → Create.
+3. Machine: `e2-micro`, OS: Ubuntu 24.04 LTS, region: `us-east1` (or west/central).
+4. Boot disk: 30 GB standard persistent disk (free-tier size).
+5. Allow HTTP is not needed. SSH is enough.
+6. Create, then SSH in.
+
+### 2. Install and start the bot
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git
+sudo useradd --create-home --shell /bin/bash amc
+sudo su - amc
+
+git clone https://github.com/YOUR_USER/amc-scraper.git
+cd amc-scraper
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+# Do not run: python3 -m playwright install chromium
+
+cp .env.example .env
+nano .env   # fill DISCORD_TOKEN and DISCORD_CHANNEL_ID
+```
+
+Then as your SSH user (not `amc`):
+
+```bash
+sudo cp /home/amc/amc-scraper/deploy/amc-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now amc-bot
+sudo systemctl status amc-bot
+```
+
+Logs:
+
+```bash
+journalctl -u amc-bot -f
+```
+
+After that, `/showtimes` and the 9:00 AM Eastern daily post keep working even if you close your laptop.

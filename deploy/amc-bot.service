@@ -1,0 +1,16 @@
+[Unit]
+Description=AMC showtimes Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=amc
+WorkingDirectory=/home/amc/amc-scraper
+EnvironmentFile=/home/amc/amc-scraper/.env
+ExecStart=/home/amc/amc-scraper/.venv/bin/python -m amc_scraper.bot
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

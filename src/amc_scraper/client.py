@@ -103,11 +103,7 @@ class AmcClient:
             "https://www.fandango.com/napi/theaterMovieShowtimes/"
             f"{theatre.fandango_id}?startDate={day.isoformat()}&isdesktop=true"
         )
-        slug_overrides = {
-            "fresh-meadows": "amc-loews-fresh-meadows-7",
-            "bay-terrace": "amc-loews-bay-terrace-6",
-        }
-        page_slug = slug_overrides.get(theatre.key, theatre.path.split("/")[-1])
+        page_slug = theatre.fandango_slug or theatre.path.split("/")[-1]
         referer = f"https://www.fandango.com/{page_slug}-{theatre.fandango_id}/theater-page"
 
         async with self._http() as client:
