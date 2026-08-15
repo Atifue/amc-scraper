@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+if [[ ! -x .venv/bin/python ]]; then
+  echo "Creating virtualenv and installing the package..."
+  python3 -m venv .venv
+  .venv/bin/pip install -e .
+fi
+
+exec .venv/bin/python -m amc_scraper.bot "$@"
