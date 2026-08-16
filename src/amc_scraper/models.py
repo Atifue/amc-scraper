@@ -45,3 +45,23 @@ class TheatreDay:
     movies: list[MovieListing]
     source: str
     showtimes_url: str
+
+
+@dataclass
+class ScheduledMovie:
+    title: str
+    rating: str | None
+    runtime_minutes: int | None
+    first_date: date
+    last_date: date
+    days_playing: int
+
+
+@dataclass
+class TheatreSchedule:
+    theatre: Theatre
+    start: date
+    end: date
+    movies: list[ScheduledMovie]
+    source: str
+    showtimes_url: str

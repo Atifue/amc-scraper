@@ -9,8 +9,9 @@ from discord.ext import commands, tasks
 
 from .client import AmcClient, ShowtimeError
 from .config import Settings
-from .formatter import listing_to_embed_payloads
-from .models import TheatreDay
+from .formatter import listing_to_embed_payloads, schedule_to_embed_payloads
+from .fandango import today_in
+from .models import TheatreDay, TheatreSchedule
 from .theatres import THEATRES, get_theatre
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ class ShowtimesBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         self.tree.add_command(showtimes)
+        self.tree.add_command(coming)
         guild_id = self.settings.discord_guild_id
         if guild_id:
             guild = discord.Object(id=guild_id)
@@ -132,6 +134,64 @@ async def showtimes(
         embeds = _embeds_from_listing(listing)
         for batch in _chunks(embeds, 10):
             await interaction.followup.send(embeds=batch)
+
+
+@app_commands.command(
+    name="coming",
+    description="List unique movies scheduled as far ahead as listings go",
+)
+@app_commands.describe(
+    theater="Which theater to list (defaults to both)",
+    through="Optional last date YYYY-MM-DD (default: keep looking until listings end)",
+)
+@app_commands.choices(theater=THEATER_CHOICES)
+async def coming(
+    interaction: discord.Interaction,
+    theater: app_commands.Choice[str] | None = None,
+    through: str | None = None,
+) -> None:
+    await interaction.response.defer()
+    bot = interaction.client
+    if not isinstance(bot, ShowtimesBot):
+        await interaction.followup.send("Bot is not ready.")
+        return
+
+    try:
+        end = _parse_optional_date(through)
+    except ValueError:
+        await interaction.followup.send("Date must be YYYY-MM-DD, for example `2026-12-31`.")
+        return
+
+    theatre_key = theater.value if theater else "both"
+    theatres = list(THEATRES) if theatre_key == "both" else [get_theatre(theatre_key)]
+    start = today_in(theatres[0].timezone)
+    try:
+        schedules = await bot.amc.fetch_schedules(theatres, start, end)
+    except ShowtimeError as exc:
+        log.exception("coming command failed")
+        await interaction.followup.send(f"Could not load upcoming movies: {exc}")
+        return
+
+    for schedule in schedules:
+        embeds = _embeds_from_schedule(schedule)
+        for batch in _chunks(embeds, 10):
+            await interaction.followup.send(embeds=batch)
+
+
+def _embeds_from_schedule(schedule: TheatreSchedule) -> list[discord.Embed]:
+    embeds: list[discord.Embed] = []
+    for payload in schedule_to_embed_payloads(schedule):
+        embed = discord.Embed(
+            title=payload["title"],
+            description=payload["description"],
+            color=payload["color"],
+            url=payload["url"],
+        )
+        footer = payload.get("footer") or {}
+        if footer.get("text"):
+            embed.set_footer(text=footer["text"])
+        embeds.append(embed)
+    return embeds
 
 
 def _parse_optional_date(raw: str | None) -> date | None:

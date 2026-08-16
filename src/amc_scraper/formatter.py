@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 
-from .models import MovieListing, TheatreDay
+from .models import MovieListing, ScheduledMovie, TheatreDay, TheatreSchedule
 
 # Discord embed limits (leave headroom for formatting)
 MAX_DESCRIPTION = 3900
@@ -22,29 +22,47 @@ def listing_to_embed_payloads(
     blocks = [block for block in blocks if block]
     if not blocks:
         description = _empty_description(listing, remaining_only=remaining_only)
-        return [_embed(heading, description, listing)]
+        return [_embed(heading, description, listing.showtimes_url, f"{listing.theatre.name} · {listing.source}")]
+    return _chunk_embeds(
+        heading,
+        blocks,
+        listing.showtimes_url,
+        f"{listing.theatre.name} · {listing.source}",
+    )
 
-    payloads: list[dict] = []
-    chunk: list[str] = []
-    size = 0
-    part = 1
-    for block in blocks:
-        extra = len(block) + (2 if chunk else 0)
-        if chunk and size + extra > MAX_DESCRIPTION:
-            title = heading if part == 1 else f"{heading} (cont.)"
-            payloads.append(_embed(title, "\n\n".join(chunk), listing))
-            chunk = [block]
-            size = len(block)
-            part += 1
-            if len(payloads) >= MAX_EMBEDS:
-                break
+
+def schedule_to_embed_payloads(schedule: TheatreSchedule) -> list[dict]:
+    heading = (
+        f"{schedule.theatre.name} — through "
+        f"{_short_date(schedule.end)}"
+    )
+    blocks = [_scheduled_movie_block(movie) for movie in schedule.movies]
+    if not blocks:
+        return [
+            _embed(
+                heading,
+                f"No movies scheduled from {_short_date(schedule.start)} to {_short_date(schedule.end)}.",
+                url=schedule.showtimes_url,
+                footer=f"{schedule.theatre.name} · {schedule.source}",
+            )
+        ]
+    return _chunk_embeds(heading, blocks, schedule.showtimes_url, f"{schedule.theatre.name} · {schedule.source}")
+
+
+def schedules_to_text(schedules: list[TheatreSchedule]) -> str:
+    parts: list[str] = []
+    for schedule in schedules:
+        heading = f"{schedule.theatre.name} — through {_short_date(schedule.end)}"
+        lines = [heading]
+        blocks = [_scheduled_movie_block(movie) for movie in schedule.movies]
+        if not blocks:
+            lines.append(
+                f"No movies scheduled from {_short_date(schedule.start)} to {_short_date(schedule.end)}."
+            )
         else:
-            chunk.append(block)
-            size += extra
-    if chunk and len(payloads) < MAX_EMBEDS:
-        title = heading if part == 1 else f"{heading} (cont.)"
-        payloads.append(_embed(title, "\n\n".join(chunk), listing))
-    return payloads
+            lines.extend(blocks)
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def listings_to_text(listings: list[TheatreDay], *, remaining_only: bool = True) -> str:
@@ -61,14 +79,56 @@ def listings_to_text(listings: list[TheatreDay], *, remaining_only: bool = True)
     return "\n\n".join(parts)
 
 
-def _embed(title: str, description: str, listing: TheatreDay) -> dict:
+def _chunk_embeds(heading: str, blocks: list[str], url: str, footer: str) -> list[dict]:
+    payloads: list[dict] = []
+    chunk: list[str] = []
+    size = 0
+    part = 1
+    for block in blocks:
+        extra = len(block) + (2 if chunk else 0)
+        if chunk and size + extra > MAX_DESCRIPTION:
+            title = heading if part == 1 else f"{heading} (cont.)"
+            payloads.append(_embed(title, "\n\n".join(chunk), url, footer))
+            chunk = [block]
+            size = len(block)
+            part += 1
+            if len(payloads) >= MAX_EMBEDS:
+                break
+        else:
+            chunk.append(block)
+            size += extra
+    if chunk and len(payloads) < MAX_EMBEDS:
+        title = heading if part == 1 else f"{heading} (cont.)"
+        payloads.append(_embed(title, "\n\n".join(chunk), url, footer))
+    return payloads
+
+
+def _embed(title: str, description: str, url: str, footer: str) -> dict:
     return {
         "title": title,
         "description": description,
         "color": AMC_RED,
-        "url": listing.showtimes_url,
-        "footer": {"text": f"{listing.theatre.name} · {listing.source}"},
+        "url": url,
+        "footer": {"text": footer},
     }
+
+
+def _scheduled_movie_block(movie: ScheduledMovie) -> str:
+    meta = " · ".join(
+        part
+        for part in (_format_rating(movie.rating), _format_runtime(movie.runtime_minutes))
+        if part
+    )
+    header = f"**{movie.title}**" + (f" — {meta}" if meta else "")
+    if movie.first_date == movie.last_date:
+        span = _short_date(movie.first_date)
+    else:
+        span = f"{_short_date(movie.first_date)} – {_short_date(movie.last_date)}"
+    return f"{header}\n{span}"
+
+
+def _short_date(value: datetime | date) -> str:
+    return value.strftime("%b ") + str(value.day)
 
 
 def _heading(listing: TheatreDay) -> str:

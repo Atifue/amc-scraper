@@ -53,6 +53,8 @@ Print today's remaining showtimes in the terminal (no Discord token needed):
 ```bash
 ./showtimes
 ./showtimes --theater fresh-meadows --date 2026-08-16 --all-times
+./showtimes --coming
+./showtimes --coming --through 2026-12-31
 ```
 
 Or with the venv activated:
@@ -77,7 +79,18 @@ Keep that process running. Slash commands need a connected gateway, and the dail
 | `theater` | One configured theater, or both (default: all of them) |
 | `date` | `YYYY-MM-DD` (defaults to today in `America/New_York`) |
 
-The daily post always includes every theater in [`src/amc_scraper/theatres.py`](src/amc_scraper/theatres.py).
+### `/coming`
+
+Unique movies scheduled from today as far ahead as AMC/Fandango has dates (no duplicate titles). Each movie shows the first and last date it appears. The heading uses that last listed date, not a fixed December cutoff.
+
+| Option | Meaning |
+| --- | --- |
+| `theater` | One configured theater, or both (default: all of them) |
+| `through` | Optional last date as `YYYY-MM-DD` if you want to stop early |
+
+The first run can take a minute while it walks the calendar. Results are cached for a few hours.
+
+The daily 9 AM post is still **today’s showtimes only**.
 
 ## Change or add theaters
 
