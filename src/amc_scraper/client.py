@@ -72,6 +72,8 @@ class AmcClient:
         theatre: Theatre | str,
         start: date | None = None,
         end: date | None = None,
+        *,
+        use_cache: bool = True,
     ) -> TheatreSchedule:
         if isinstance(theatre, str):
             theatre = get_theatre(theatre)
@@ -79,11 +81,14 @@ class AmcClient:
         if end is not None and end < start:
             raise ShowtimeError("End date must be on or after the start date")
 
-        cached = self._get_schedule_cached(theatre, start, end)
-        if cached is not None:
-            return cached
+        if use_cache:
+            cached = self._get_schedule_cached(theatre, start, end)
+            if cached is not None:
+                return cached
 
-        listings = await self._scan_schedule_days(theatre, start, end)
+        listings = await self._scan_schedule_days(
+            theatre, start, end, use_cache=use_cache
+        )
         movies = _aggregate_schedule(listings)
         visible_end = max((movie.last_date for movie in movies), default=start)
         schedule = TheatreSchedule(
@@ -94,14 +99,34 @@ class AmcClient:
             source="fandango",
             showtimes_url=theatre.showtimes_url(start),
         )
-        self._store_schedule_cached(theatre, start, end, schedule)
+        if use_cache:
+            self._store_schedule_cached(theatre, start, end, schedule)
         return schedule
+
+    async def fetch_schedule_listings(
+        self,
+        theatre: Theatre | str,
+        start: date | None = None,
+        end: date | None = None,
+        *,
+        use_cache: bool = True,
+    ) -> list[TheatreDay | None]:
+        if isinstance(theatre, str):
+            theatre = get_theatre(theatre)
+        start = start or today_in(theatre.timezone)
+        if end is not None and end < start:
+            raise ShowtimeError("End date must be on or after the start date")
+        return await self._scan_schedule_days(
+            theatre, start, end, use_cache=use_cache
+        )
 
     async def _scan_schedule_days(
         self,
         theatre: Theatre,
         start: date,
         end: date | None,
+        *,
+        use_cache: bool = True,
     ) -> list[TheatreDay | None]:
         horizon = start + timedelta(days=_MAX_HORIZON_DAYS)
         cap = min(end, horizon) if end is not None else horizon
@@ -115,7 +140,9 @@ class AmcClient:
                 batch_days = _date_range(current, batch_end)
                 batch = await asyncio.gather(
                     *[
-                        self._fetch_schedule_day(client, semaphore, theatre, day)
+                        self._fetch_schedule_day(
+                            client, semaphore, theatre, day, use_cache=use_cache
+                        )
                         for day in batch_days
                     ]
                 )
@@ -151,17 +178,26 @@ class AmcClient:
         semaphore: asyncio.Semaphore,
         theatre: Theatre,
         day: date,
+        *,
+        use_cache: bool = True,
     ) -> TheatreDay | None:
-        cached = self._get_cached(theatre, day)
-        if cached is not None:
-            return cached
+        if use_cache:
+            cached = self._get_cached(theatre, day)
+            if cached is not None:
+                return cached
         async with semaphore:
             try:
                 listing = await self._fetch_fandango(theatre, day, client=client)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    raise
+                log.warning("Schedule fetch failed for %s %s: %s", theatre.key, day, exc)
+                return None
             except Exception as exc:
                 log.warning("Schedule fetch failed for %s %s: %s", theatre.key, day, exc)
                 return None
-        self._store_cached(theatre, day, listing)
+        if use_cache:
+            self._store_cached(theatre, day, listing)
         return listing
 
     async def _fetch_uncached(self, theatre: Theatre, day: date) -> TheatreDay:

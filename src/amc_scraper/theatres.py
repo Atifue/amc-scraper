@@ -20,7 +20,17 @@ BAY_TERRACE = Theatre(
     fandango_slug="amc-loews-bay-terrace-6",
 )
 
-THEATRES: tuple[Theatre, ...] = (FRESH_MEADOWS, BAY_TERRACE)
+LINCOLN_SQUARE = Theatre(
+    key="lincoln-square",
+    name="AMC Lincoln Square 13",
+    path="new-york-city/amc-lincoln-square-13",
+    slug="lincolnsquare",
+    fandango_id="aabqi",
+    amc_slug="amc-lincoln-square-13",
+    fandango_slug="amc-lincoln-square-13",
+)
+
+THEATRES: tuple[Theatre, ...] = (FRESH_MEADOWS, BAY_TERRACE, LINCOLN_SQUARE)
 THEATRES_BY_KEY = {theatre.key: theatre for theatre in THEATRES}
 
 

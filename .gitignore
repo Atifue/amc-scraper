@@ -8,3 +8,4 @@ build/
 .pytest_cache/
 .playwright-cli/
 *.log
+data/seen_showtimes.json

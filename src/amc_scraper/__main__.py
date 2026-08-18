@@ -13,11 +13,11 @@ from .theatres import THEATRES, get_theatre
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Print AMC showtimes for Fresh Meadows and Bay Terrace")
+    parser = argparse.ArgumentParser(description="Print AMC showtimes for configured theaters")
     parser.add_argument(
         "--theater",
-        choices=["both", *[theatre.key for theatre in THEATRES]],
-        default="both",
+        choices=["all", *[theatre.key for theatre in THEATRES]],
+        default="all",
     )
     parser.add_argument("--date", help="YYYY-MM-DD (defaults to today in America/New_York)")
     parser.add_argument(
@@ -37,7 +37,7 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    theatres = list(THEATRES) if args.theater == "both" else [get_theatre(args.theater)]
+    theatres = list(THEATRES) if args.theater == "all" else [get_theatre(args.theater)]
     settings = Settings.from_env(require_discord=False)
     client = AmcClient(settings)
     if args.coming or args.through:

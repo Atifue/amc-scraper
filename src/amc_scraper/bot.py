@@ -1,30 +1,37 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime, time as dt_time
 
 import discord
+import httpx
 from discord import app_commands
 from discord.ext import commands, tasks
 
 from .client import AmcClient, ShowtimeError
 from .config import Settings
-from .formatter import listing_to_embed_payloads, schedule_to_embed_payloads
+from .formatter import (
+    listing_to_embed_payloads,
+    new_showtimes_to_embed_payloads,
+    schedule_to_embed_payloads,
+)
 from .fandango import today_in
 from .models import TheatreDay, TheatreSchedule
 from .theatres import THEATRES, get_theatre
+from .watch import load_seen, save_seen, showtimes_from_listings
 
 log = logging.getLogger(__name__)
 
 THEATER_CHOICES = [
-    app_commands.Choice(name="Both", value="both"),
+    app_commands.Choice(name="All", value="all"),
     *[app_commands.Choice(name=theatre.name, value=theatre.key) for theatre in THEATRES],
 ]
 
 
-def _embeds_from_listing(listing: TheatreDay) -> list[discord.Embed]:
+def _embeds_from_payloads(payloads: list[dict]) -> list[discord.Embed]:
     embeds: list[discord.Embed] = []
-    for payload in listing_to_embed_payloads(listing):
+    for payload in payloads:
         embed = discord.Embed(
             title=payload["title"],
             description=payload["description"],
@@ -38,6 +45,10 @@ def _embeds_from_listing(listing: TheatreDay) -> list[discord.Embed]:
     return embeds
 
 
+def _embeds_from_listing(listing: TheatreDay) -> list[discord.Embed]:
+    return _embeds_from_payloads(listing_to_embed_payloads(listing))
+
+
 def _chunks(items: list[discord.Embed], size: int) -> list[list[discord.Embed]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
 
@@ -48,7 +59,10 @@ class ShowtimesBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.settings = settings
         self.amc = AmcClient(settings)
+        self._watch_busy = False
+        self._watch_resume_at = 0.0
         self.daily_showtimes.change_interval(time=settings.post_time)
+        self.watch_showtimes.change_interval(seconds=settings.watch_interval_seconds)
 
     async def setup_hook(self) -> None:
         self.tree.add_command(showtimes)
@@ -63,6 +77,7 @@ class ShowtimesBot(commands.Bot):
             synced = await self.tree.sync()
             log.info("Synced %s global command(s)", len(synced))
         self.daily_showtimes.start()
+        self.watch_showtimes.start()
 
     async def on_ready(self) -> None:
         user = self.user
@@ -94,13 +109,84 @@ class ShowtimesBot(commands.Bot):
     async def before_daily_showtimes(self) -> None:
         await self.wait_until_ready()
 
+    @tasks.loop(seconds=60)
+    async def watch_showtimes(self) -> None:
+        if self._watch_busy:
+            log.info("Skipping Lincoln Square watch; previous scan still running")
+            return
+        if time.monotonic() < self._watch_resume_at:
+            return
+        self._watch_busy = True
+        try:
+            await self._poll_lincoln_square()
+        except Exception:
+            log.exception("Lincoln Square watch tick failed")
+        finally:
+            self._watch_busy = False
+
+    @watch_showtimes.before_loop
+    async def before_watch_showtimes(self) -> None:
+        await self.wait_until_ready()
+
+    async def _poll_lincoln_square(self) -> None:
+        theatre = get_theatre(self.settings.watch_theatre)
+        try:
+            listings = await self.amc.fetch_schedule_listings(theatre, use_cache=False)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                log.warning(
+                    "HTTP 429 during %s watch; backing off 5 minutes",
+                    theatre.name,
+                )
+                self._watch_resume_at = time.monotonic() + 300
+                return
+            log.exception("%s watch fetch failed", theatre.name)
+            return
+        except ShowtimeError:
+            log.exception("%s watch fetch failed", theatre.name)
+            return
+
+        current = showtimes_from_listings(listings)
+        current_keys = {item.key() for item in current}
+        initialized, seen = load_seen()
+        if not initialized:
+            save_seen(current_keys)
+            log.info(
+                "Saved %s showtime baseline (%s keys); no alert",
+                theatre.name,
+                len(current_keys),
+            )
+            return
+
+        new_keys = current_keys - seen
+        if not new_keys:
+            return
+
+        new_items = [item for item in current if item.key() in new_keys]
+        log.info("New showtimes at %s: %s", theatre.name, len(new_items))
+
+        channel_id = self.settings.discord_channel_id
+        try:
+            channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+        except discord.HTTPException:
+            log.exception("Could not fetch DISCORD_CHANNEL_ID %s", channel_id)
+            return
+        if not isinstance(channel, discord.abc.Messageable):
+            log.error("DISCORD_CHANNEL_ID %s is not a text channel", channel_id)
+            return
+
+        embeds = _embeds_from_payloads(new_showtimes_to_embed_payloads(theatre, new_items))
+        for batch in _chunks(embeds, 10):
+            await channel.send(embeds=batch)
+        save_seen(seen | current_keys)
+
 
 @app_commands.command(
     name="showtimes",
     description="List movies playing at the configured AMC theaters",
 )
 @app_commands.describe(
-    theater="Which theater to list (defaults to both)",
+    theater="Which theater to list (defaults to all)",
     date="Date as YYYY-MM-DD (defaults to today)",
 )
 @app_commands.choices(theater=THEATER_CHOICES)
@@ -121,8 +207,8 @@ async def showtimes(
         await interaction.followup.send("Date must be YYYY-MM-DD, for example `2026-08-15`.")
         return
 
-    theatre_key = theater.value if theater else "both"
-    theatres = list(THEATRES) if theatre_key == "both" else [get_theatre(theatre_key)]
+    theatre_key = theater.value if theater else "all"
+    theatres = list(THEATRES) if theatre_key == "all" else [get_theatre(theatre_key)]
     try:
         listings = await bot.amc.fetch_many(theatres, day, remaining_only=True)
     except ShowtimeError as exc:
@@ -141,7 +227,7 @@ async def showtimes(
     description="List unique movies scheduled as far ahead as listings go",
 )
 @app_commands.describe(
-    theater="Which theater to list (defaults to both)",
+    theater="Which theater to list (defaults to all)",
     through="Optional last date YYYY-MM-DD (default: keep looking until listings end)",
 )
 @app_commands.choices(theater=THEATER_CHOICES)
@@ -162,8 +248,8 @@ async def coming(
         await interaction.followup.send("Date must be YYYY-MM-DD, for example `2026-12-31`.")
         return
 
-    theatre_key = theater.value if theater else "both"
-    theatres = list(THEATRES) if theatre_key == "both" else [get_theatre(theatre_key)]
+    theatre_key = theater.value if theater else "all"
+    theatres = list(THEATRES) if theatre_key == "all" else [get_theatre(theatre_key)]
     start = today_in(theatres[0].timezone)
     try:
         schedules = await bot.amc.fetch_schedules(theatres, start, end)
@@ -179,19 +265,7 @@ async def coming(
 
 
 def _embeds_from_schedule(schedule: TheatreSchedule) -> list[discord.Embed]:
-    embeds: list[discord.Embed] = []
-    for payload in schedule_to_embed_payloads(schedule):
-        embed = discord.Embed(
-            title=payload["title"],
-            description=payload["description"],
-            color=payload["color"],
-            url=payload["url"],
-        )
-        footer = payload.get("footer") or {}
-        if footer.get("text"):
-            embed.set_footer(text=footer["text"])
-        embeds.append(embed)
-    return embeds
+    return _embeds_from_payloads(schedule_to_embed_payloads(schedule))
 
 
 def _parse_optional_date(raw: str | None) -> date | None:

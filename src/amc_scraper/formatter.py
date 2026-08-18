@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime
 
-from .models import MovieListing, ScheduledMovie, TheatreDay, TheatreSchedule
+from .models import MovieListing, ScheduledMovie, Theatre, TheatreDay, TheatreSchedule
+from .watch import WatchedShowtime
 
 # Discord embed limits (leave headroom for formatting)
 MAX_DESCRIPTION = 3900
@@ -63,6 +64,41 @@ def schedules_to_text(schedules: list[TheatreSchedule]) -> str:
             lines.extend(blocks)
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
+
+
+def new_showtimes_to_embed_payloads(
+    theatre: Theatre,
+    items: list[WatchedShowtime],
+) -> list[dict]:
+    heading = f"New showtimes at {theatre.name}"
+    blocks = _new_showtime_blocks(items)
+    if not blocks:
+        return []
+    return _chunk_embeds(
+        heading,
+        blocks,
+        theatre.showtimes_url(items[0].date),
+        theatre.name,
+    )
+
+
+def _new_showtime_blocks(items: list[WatchedShowtime]) -> list[str]:
+    grouped: dict[str, dict[date, dict[str, list[datetime]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(list))
+    )
+    for item in items:
+        grouped[item.title][item.date][item.format_name].append(item.time_local)
+    blocks: list[str] = []
+    for title in sorted(grouped, key=str.casefold):
+        lines = [f"**{title}**"]
+        for day in sorted(grouped[title]):
+            lines.append(_short_date(day))
+            for format_name in grouped[title][day]:
+                clocks = grouped[title][day][format_name]
+                unique = list(dict.fromkeys(_format_clock(clock) for clock in sorted(clocks)))
+                lines.append(f"{format_name}: {' · '.join(unique)}")
+        blocks.append("\n".join(lines))
+    return blocks
 
 
 def listings_to_text(listings: list[TheatreDay], *, remaining_only: bool = True) -> str:

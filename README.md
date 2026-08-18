@@ -1,6 +1,6 @@
 # amc-scraper
 
-Discord bot that posts daily showtimes for **AMC Fresh Meadows 7** and **AMC Bay Terrace 6**, and answers `/showtimes` on demand.
+Discord bot that posts daily showtimes for **AMC Fresh Meadows 7**, **AMC Bay Terrace 6**, and **AMC Lincoln Square 13**, and answers `/showtimes` and `/coming` on demand. It also watches Lincoln Square about once a minute and pings Discord when any new showtime appears.
 
 ## Data source
 
@@ -76,7 +76,7 @@ Keep that process running. Slash commands need a connected gateway, and the dail
 
 | Option | Meaning |
 | --- | --- |
-| `theater` | One configured theater, or both (default: all of them) |
+| `theater` | One configured theater, or all (default: all of them) |
 | `date` | `YYYY-MM-DD` (defaults to today in `America/New_York`) |
 
 ### `/coming`
@@ -85,12 +85,31 @@ Unique movies scheduled from today as far ahead as AMC/Fandango has dates (no du
 
 | Option | Meaning |
 | --- | --- |
-| `theater` | One configured theater, or both (default: all of them) |
+| `theater` | One configured theater, or all (default: all of them) |
 | `through` | Optional last date as `YYYY-MM-DD` if you want to stop early |
 
 The first run can take a minute while it walks the calendar. Results are cached for a few hours.
 
 The daily 9 AM post is still **today’s showtimes only**.
+
+### Lincoln Square watcher
+
+The bot polls **AMC Lincoln Square 13 only** about every 60 seconds (`WATCH_INTERVAL_SECONDS`) using the same calendar scan as `/coming`. Fresh Meadows and Bay Terrace are not watched.
+
+- First successful poll writes a baseline to `data/seen_showtimes.json` and does **not** ping Discord.
+- Later polls post one embed when any new `title|date|time|format` showtime appears (no title filter).
+- HTTP 429 backs off for 5 minutes. If a scan is still running, the next tick is skipped.
+- That seen file is gitignored so a GCP restart does not re-spam the channel.
+
+```
+WATCH_THEATRE=lincoln-square
+WATCH_INTERVAL_SECONDS=60
+```
+
+```bash
+./showtimes --coming --theater lincoln-square
+./showtimes --coming
+```
 
 ## Change or add theaters
 
@@ -124,7 +143,7 @@ LINCOLN_SQUARE = Theatre(
 THEATRES: tuple[Theatre, ...] = (FRESH_MEADOWS, BAY_TERRACE, LINCOLN_SQUARE)
 ```
 
-`key` is the CLI / slash-command value (`./showtimes --theater lincoln-square`). Discord allows at most 25 slash-command choices, including **Both**.
+`key` is the CLI / slash-command value (`./showtimes --theater lincoln-square`). Discord allows at most 25 slash-command choices, including **All**. Lincoln Square is already in `THEATRES`; the block above is only a template for adding another house.
 
 Restart the bot after editing (`sudo systemctl restart amc-bot` on the VM).
 
