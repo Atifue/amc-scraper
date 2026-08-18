@@ -70,7 +70,7 @@ def new_showtimes_to_embed_payloads(
     theatre: Theatre,
     items: list[WatchedShowtime],
 ) -> list[dict]:
-    heading = f"New showtimes at {theatre.name}"
+    heading = f"Tickets on sale at {theatre.name}"
     blocks = _new_showtime_blocks(items)
     if not blocks:
         return []

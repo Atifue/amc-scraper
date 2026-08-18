@@ -98,12 +98,15 @@ def _parse_showtime(
         return None
     expired = bool(raw.get("expired")) or raw.get("type") == "pastshowtime"
     ticket_url = raw.get("ticketingJumpPageURL") or None
+    show_type = str(raw.get("type") or "").casefold()
+    buyable = show_type == "available"
     return Showtime(
         time_local=local,
         format_name=format_name,
         amenities=amenities,
         ticket_url=ticket_url,
         expired=expired,
+        buyable=buyable,
     )
 
 

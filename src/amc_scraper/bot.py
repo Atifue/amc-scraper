@@ -156,13 +156,13 @@ class ShowtimesBot(commands.Bot):
             log.exception("%s watch fetch failed", theatre.name)
             return
 
-        current = showtimes_from_listings(listings)
+        current = showtimes_from_listings(listings, buyable_only=True)
         current_keys = {item.key() for item in current}
         initialized, seen = load_seen()
         if not initialized:
             save_seen(current_keys)
             log.info(
-                "Saved %s showtime baseline (%s keys); no alert",
+                "Saved %s buyable-showtime baseline (%s keys); no alert",
                 theatre.name,
                 len(current_keys),
             )
@@ -173,7 +173,7 @@ class ShowtimesBot(commands.Bot):
             return
 
         new_items = [item for item in current if item.key() in new_keys]
-        log.info("New showtimes at %s: %s", theatre.name, len(new_items))
+        log.info("Buyable showtimes at %s: %s", theatre.name, len(new_items))
 
         channel_id = self.settings.discord_channel_id
         try:
@@ -186,8 +186,14 @@ class ShowtimesBot(commands.Bot):
             return
 
         embeds = _embeds_from_payloads(new_showtimes_to_embed_payloads(theatre, new_items))
-        for batch in _chunks(embeds, 10):
-            await channel.send(embeds=batch)
+        mention = discord.AllowedMentions(everyone=True)
+        for index, batch in enumerate(_chunks(embeds, 10)):
+            content = (
+                f"@here Tickets are buyable at {theatre.name}"
+                if index == 0
+                else None
+            )
+            await channel.send(content=content, embeds=batch, allowed_mentions=mention)
         save_seen(seen | current_keys)
 
 

@@ -96,10 +96,10 @@ The daily 9 AM post is still **today’s showtimes only**.
 
 The bot polls **AMC Lincoln Square 13 only** about every 60 seconds (`WATCH_INTERVAL_SECONDS`) using Fandango’s theater calendar, then showtimes for those dates. Fresh Meadows and Bay Terrace are not watched.
 
-- First successful poll writes a baseline to `data/seen_showtimes.json` and does **not** ping Discord.
-- Later polls post one embed when any new `title|date|time|format` showtime appears (no title filter).
+- First successful poll writes a buyable-only baseline to `data/seen_showtimes.json` and does **not** ping Discord.
+- Later polls `@here` the channel when a Lincoln Square showtime becomes **buyable** on Fandango (`type: available`), not when a grayed-out placeholder listing first appears.
 - HTTP 403/429 backs off for 10 minutes. If a scan is still running, the next tick is skipped.
-- That seen file is gitignored so a GCP restart does not re-spam the channel.
+- That seen file is gitignored so a GCP restart does not re-spam the channel. After this buyable change, the first poll rebases that file (no ping).
 
 ```
 WATCH_THEATRE=lincoln-square

@@ -28,6 +28,7 @@ class Showtime:
     amenities: tuple[str, ...] = ()
     ticket_url: str | None = None
     expired: bool = False
+    buyable: bool = False
 
 
 @dataclass
