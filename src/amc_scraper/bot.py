@@ -133,16 +133,26 @@ class ShowtimesBot(commands.Bot):
         try:
             listings = await self.amc.fetch_schedule_listings(theatre, use_cache=False)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429:
+            if exc.response.status_code in {403, 429}:
                 log.warning(
-                    "HTTP 429 during %s watch; backing off 5 minutes",
+                    "HTTP %s during %s watch; backing off 10 minutes",
+                    exc.response.status_code,
                     theatre.name,
                 )
-                self._watch_resume_at = time.monotonic() + 300
+                self._watch_resume_at = time.monotonic() + 600
                 return
             log.exception("%s watch fetch failed", theatre.name)
             return
-        except ShowtimeError:
+        except ShowtimeError as exc:
+            message = str(exc)
+            if "HTTP 403" in message or "HTTP 429" in message:
+                log.warning(
+                    "%s watch blocked by Fandango; backing off 10 minutes: %s",
+                    theatre.name,
+                    exc,
+                )
+                self._watch_resume_at = time.monotonic() + 600
+                return
             log.exception("%s watch fetch failed", theatre.name)
             return
 

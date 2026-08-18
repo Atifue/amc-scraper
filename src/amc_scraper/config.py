@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from .fandango import USER_AGENT
+
 
 def _parse_post_time(raw: str, tz: ZoneInfo) -> time:
     hour_s, minute_s = raw.strip().split(":", 1)
@@ -25,10 +27,7 @@ class Settings:
     inter_theatre_delay: float = 0.75
     watch_theatre: str = "lincoln-square"
     watch_interval_seconds: int = 60
-    user_agent: str = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-    )
+    user_agent: str = USER_AGENT
 
     @classmethod
     def from_env(cls, *, require_discord: bool = True) -> Settings:

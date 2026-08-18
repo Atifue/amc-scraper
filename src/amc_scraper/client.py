@@ -32,6 +32,8 @@ class AmcClient:
         self.settings = settings or Settings.from_env(require_discord=False)
         self._cache: dict[tuple[str, str], tuple[float, TheatreDay]] = {}
         self._schedule_cache: dict[tuple[str, str, str], tuple[float, TheatreSchedule]] = {}
+        self._cookies = httpx.Cookies()
+        self._warmed: set[str] = set()
 
     async def fetch(
         self,
@@ -133,8 +135,14 @@ class AmcClient:
         listings: list[TheatreDay | None] = []
         empty_streak = 0
         current = start
-        semaphore = asyncio.Semaphore(6)
+        semaphore = asyncio.Semaphore(_SCAN_CONCURRENCY)
         async with self._http() as client:
+            await self._warmup_fandango(client, theatre)
+            calendar_days = await self._calendar_days(client, theatre, start, cap)
+            if calendar_days is not None:
+                return await self._fetch_days(
+                    client, semaphore, theatre, calendar_days, use_cache=use_cache
+                )
             while current <= cap:
                 batch_end = min(current + timedelta(days=_SCAN_BATCH_DAYS - 1), cap)
                 batch_days = _date_range(current, batch_end)
@@ -157,6 +165,67 @@ class AmcClient:
                     break
                 current = batch_end + timedelta(days=1)
         return listings
+
+    async def _fetch_days(
+        self,
+        client: httpx.AsyncClient,
+        semaphore: asyncio.Semaphore,
+        theatre: Theatre,
+        days: list[date],
+        *,
+        use_cache: bool,
+    ) -> list[TheatreDay | None]:
+        listings: list[TheatreDay | None] = []
+        for index in range(0, len(days), _SCAN_BATCH_DAYS):
+            if index:
+                await asyncio.sleep(0.25)
+            batch_days = days[index : index + _SCAN_BATCH_DAYS]
+            batch = await asyncio.gather(
+                *[
+                    self._fetch_schedule_day(
+                        client, semaphore, theatre, day, use_cache=use_cache
+                    )
+                    for day in batch_days
+                ]
+            )
+            listings.extend(batch)
+        return listings
+
+    async def _calendar_days(
+        self,
+        client: httpx.AsyncClient,
+        theatre: Theatre,
+        start: date,
+        cap: date,
+    ) -> list[date] | None:
+        url = f"https://www.fandango.com/napi/theaterCalendar/{theatre.fandango_id}"
+        try:
+            response = await self._fandango_get(client, theatre, url)
+            payload = response.json()
+        except httpx.HTTPStatusError:
+            raise
+        except Exception as exc:
+            log.warning("Fandango calendar failed for %s: %s", theatre.key, exc)
+            return None
+        raw_dates = payload.get("showtimeDates") or []
+        days: list[date] = []
+        for raw in raw_dates:
+            try:
+                day = date.fromisoformat(str(raw)[:10])
+            except ValueError:
+                continue
+            if start <= day <= cap:
+                days.append(day)
+        if not days:
+            return None
+        log.info(
+            "Fandango calendar for %s: %s days %s – %s",
+            theatre.key,
+            len(days),
+            days[0],
+            days[-1],
+        )
+        return days
 
     async def fetch_schedules(
         self,
@@ -189,7 +258,7 @@ class AmcClient:
             try:
                 listing = await self._fetch_fandango(theatre, day, client=client)
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429:
+                if exc.response.status_code in {403, 429}:
                     raise
                 log.warning("Schedule fetch failed for %s %s: %s", theatre.key, day, exc)
                 return None
@@ -213,18 +282,30 @@ class AmcClient:
                 errors.append(f"amc-api: {exc}")
 
         try:
-            return await self._fetch_fandango(theatre, day)
+            async with self._http() as client:
+                await self._warmup_fandango(client, theatre)
+                return await self._fetch_fandango(theatre, day, client=client)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {403, 429}:
+                raise ShowtimeError(
+                    f"Could not load showtimes for {theatre.name}: "
+                    f"Fandango returned HTTP {exc.response.status_code}. "
+                    "This is usually a temporary block. Try again in a few minutes."
+                ) from exc
+            log.warning("Fandango listings failed for %s: %s", theatre.key, exc)
+            errors.append(f"fandango: {exc}")
         except Exception as exc:
             log.warning("Fandango listings failed for %s: %s", theatre.key, exc)
             errors.append(f"fandango: {exc}")
 
-        try:
-            return await amc_web.fetch_theatre_day(
-                theatre, day, self.settings.user_agent
-            )
-        except Exception as exc:
-            log.warning("AMC website scrape failed for %s: %s", theatre.key, exc)
-            errors.append(f"amc-web: {exc}")
+        if amc_web.chromium_available():
+            try:
+                return await amc_web.fetch_theatre_day(
+                    theatre, day, self.settings.user_agent
+                )
+            except Exception as exc:
+                log.warning("AMC website scrape failed for %s: %s", theatre.key, exc)
+                errors.append(f"amc-web: {exc}")
 
         raise ShowtimeError(
             f"Could not load showtimes for {theatre.name}: " + " | ".join(errors)
@@ -241,27 +322,65 @@ class AmcClient:
             "https://www.fandango.com/napi/theaterMovieShowtimes/"
             f"{theatre.fandango_id}?startDate={day.isoformat()}&isdesktop=true"
         )
-        page_slug = theatre.fandango_slug or theatre.path.split("/")[-1]
-        referer = f"https://www.fandango.com/{page_slug}-{theatre.fandango_id}/theater-page"
-        headers = {
-            "Accept": "application/json",
-            "Referer": referer,
-            "Origin": "https://www.fandango.com",
-        }
         if client is None:
             async with self._http() as owned:
-                response = await owned.get(url, headers=headers)
-                response.raise_for_status()
-                payload = response.json()
+                await self._warmup_fandango(owned, theatre)
+                response = await self._fandango_get(owned, theatre, url)
         else:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
-        return parse_fandango_payload(theatre, day, payload)
+            response = await self._fandango_get(client, theatre, url)
+        return parse_fandango_payload(theatre, day, response.json())
+
+    async def _fandango_get(
+        self,
+        client: httpx.AsyncClient,
+        theatre: Theatre,
+        url: str,
+    ) -> httpx.Response:
+        headers = self._fandango_headers(theatre)
+        response = await client.get(url, headers=headers)
+        if response.status_code in {403, 429}:
+            self._warmed.discard(theatre.key)
+            await asyncio.sleep(1.5)
+            await self._warmup_fandango(client, theatre)
+            response = await client.get(url, headers=self._fandango_headers(theatre))
+        response.raise_for_status()
+        return response
+
+    async def _warmup_fandango(self, client: httpx.AsyncClient, theatre: Theatre) -> None:
+        if theatre.key in self._warmed:
+            return
+        page_url = _fandango_page_url(theatre)
+        try:
+            await client.get(
+                page_url,
+                headers={
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                        "image/avif,image/webp,*/*;q=0.8"
+                    ),
+                    "Referer": "https://www.fandango.com/",
+                },
+            )
+        except Exception as exc:
+            log.warning("Fandango warmup failed for %s: %s", theatre.key, exc)
+            return
+        self._warmed.add(theatre.key)
+
+    def _fandango_headers(self, theatre: Theatre) -> dict[str, str]:
+        return {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": "https://www.fandango.com",
+            "Referer": _fandango_page_url(theatre),
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
 
     def _http(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent or USER_AGENT},
+            cookies=self._cookies,
             timeout=httpx.Timeout(25.0),
             follow_redirects=True,
         )
@@ -336,7 +455,13 @@ class AmcClient:
 _MAX_HORIZON_DAYS = 548
 _MIN_SCAN_DAYS = 90
 _EMPTY_STOP_DAYS = 120
-_SCAN_BATCH_DAYS = 14
+_SCAN_BATCH_DAYS = 8
+_SCAN_CONCURRENCY = 2
+
+
+def _fandango_page_url(theatre: Theatre) -> str:
+    page_slug = theatre.fandango_slug or theatre.path.split("/")[-1]
+    return f"https://www.fandango.com/{page_slug}-{theatre.fandango_id}/theater-page"
 
 
 def _schedule_cache_key(theatre: Theatre, start: date, end: date | None) -> tuple[str, str, str]:

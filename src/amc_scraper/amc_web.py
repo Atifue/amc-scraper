@@ -12,16 +12,28 @@ TIME_RE = re.compile(r"\b(\d{1,2}:\d{2}\s*[AP]M)\b", re.IGNORECASE)
 ERROR_MARKERS = ("ERROR 500", "Global Safety Net", "queue.amctheatres.com")
 
 
+def chromium_available() -> bool:
+    try:
+        from playwright.async_api import async_playwright  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 async def fetch_theatre_day(theatre: Theatre, day: date, user_agent: str) -> TheatreDay:
     """Best-effort Playwright scrape of the public AMC showtimes page."""
     try:
+        from playwright.async_api import Error as PlaywrightError
         from playwright.async_api import async_playwright
     except ImportError as exc:
         raise RuntimeError("playwright is not installed") from exc
 
     url = theatre.showtimes_url(day)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        try:
+            browser = await playwright.chromium.launch(headless=True)
+        except PlaywrightError as exc:
+            raise RuntimeError("Chromium is not installed; skipping AMC website scrape") from exc
         try:
             context = await browser.new_context(user_agent=user_agent, locale="en-US")
             page = await context.new_page()

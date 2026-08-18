@@ -94,11 +94,11 @@ The daily 9 AM post is still **today’s showtimes only**.
 
 ### Lincoln Square watcher
 
-The bot polls **AMC Lincoln Square 13 only** about every 60 seconds (`WATCH_INTERVAL_SECONDS`) using the same calendar scan as `/coming`. Fresh Meadows and Bay Terrace are not watched.
+The bot polls **AMC Lincoln Square 13 only** about every 60 seconds (`WATCH_INTERVAL_SECONDS`) using Fandango’s theater calendar, then showtimes for those dates. Fresh Meadows and Bay Terrace are not watched.
 
 - First successful poll writes a baseline to `data/seen_showtimes.json` and does **not** ping Discord.
 - Later polls post one embed when any new `title|date|time|format` showtime appears (no title filter).
-- HTTP 429 backs off for 5 minutes. If a scan is still running, the next tick is skipped.
+- HTTP 403/429 backs off for 10 minutes. If a scan is still running, the next tick is skipped.
 - That seen file is gitignored so a GCP restart does not re-spam the channel.
 
 ```
