@@ -99,6 +99,24 @@ Lincoln Square stays on `/showtimes` and `/coming` (pick **AMC Lincoln Square 13
 ./showtimes --theater lincoln-square
 ```
 
+### `/seats`
+
+Read-only Fandango seat map for a showtime that is **already on sale**. This is not the AMC app map and does not buy tickets.
+
+| Option | Meaning |
+| --- | --- |
+| `theater` | One theater (required) |
+| `movie` | Title, or enough of it to match |
+| `time` | Clock time, like `7:30 PM` |
+| `date` | `YYYY-MM-DD` (defaults to today) |
+| `format` | Optional, if two screens share the same time (`IMAX`) |
+
+If tickets are not on sale yet (Lincoln Square Dune-style placeholders), Fandango has no map and the command says so.
+
+```bash
+./showtimes --seats --theater fresh-meadows --movie Insidious --time 7:30pm
+```
+
 ## Change or add theaters
 
 Theater list lives in [`src/amc_scraper/theatres.py`](src/amc_scraper/theatres.py). The `/showtimes` menu and CLI `--theater` flag read from `THEATRES`. The daily 9 AM post uses `DAILY_THEATRES` (Fresh Meadows and Bay Terrace).

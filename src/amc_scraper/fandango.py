@@ -100,6 +100,9 @@ def _parse_showtime(
     ticket_url = raw.get("ticketingJumpPageURL") or None
     show_type = str(raw.get("type") or "").casefold()
     buyable = show_type == "available"
+    showtime_hash = raw.get("showtimeHashCode") or None
+    if showtime_hash is not None:
+        showtime_hash = str(showtime_hash)
     return Showtime(
         time_local=local,
         format_name=format_name,
@@ -107,6 +110,7 @@ def _parse_showtime(
         ticket_url=ticket_url,
         expired=expired,
         buyable=buyable,
+        showtime_hash=showtime_hash,
     )
 
 

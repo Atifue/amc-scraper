@@ -29,6 +29,7 @@ class Showtime:
     ticket_url: str | None = None
     expired: bool = False
     buyable: bool = False
+    showtime_hash: str | None = None
 
 
 @dataclass

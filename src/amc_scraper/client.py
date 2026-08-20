@@ -10,7 +10,8 @@ import httpx
 from . import amc_api, amc_web
 from .config import Settings
 from .fandango import USER_AGENT, parse_fandango_payload, today_in
-from .models import MovieListing, ScheduledMovie, Theatre, TheatreDay, TheatreSchedule
+from .models import MovieListing, ScheduledMovie, Showtime, Theatre, TheatreDay, TheatreSchedule
+from .seats import SeatLookupError, SeatMap, match_buyable_showtime, parse_clock_query, parse_seat_map
 from .theatres import THEATRES, get_theatre
 
 log = logging.getLogger(__name__)
@@ -68,6 +69,40 @@ class AmcClient:
                 await self.fetch(theatre, day, remaining_only=remaining_only)
             )
         return listings
+
+    async def fetch_seat_map(
+        self,
+        theatre: Theatre | str,
+        movie: str,
+        show_time: str,
+        day: date | None = None,
+        format_name: str | None = None,
+    ) -> tuple[MovieListing, Showtime, SeatMap]:
+        if isinstance(theatre, str):
+            theatre = get_theatre(theatre)
+        clock = parse_clock_query(show_time)
+        listing = await self.fetch(theatre, day, remaining_only=True)
+        movie_listing, show = match_buyable_showtime(
+            listing, movie, clock, format_name
+        )
+        if not show.showtime_hash:
+            raise SeatLookupError(
+                "That showtime is not on sale yet, so Fandango has no seat map."
+            )
+        try:
+            payload = await self._fetch_seat_payload(theatre, show.showtime_hash)
+        except httpx.HTTPStatusError as exc:
+            raise ShowtimeError(
+                f"Fandango seat map failed (HTTP {exc.response.status_code})"
+            ) from exc
+        return movie_listing, show, parse_seat_map(payload)
+
+    async def _fetch_seat_payload(self, theatre: Theatre, showtime_hash: str) -> dict:
+        url = f"https://www.fandango.com/napi/seatMap/{showtime_hash}"
+        async with self._http() as client:
+            await self._warmup_fandango(client, theatre)
+            response = await self._fandango_get(client, theatre, url)
+        return response.json()
 
     async def fetch_schedule(
         self,

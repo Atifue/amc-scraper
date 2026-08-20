@@ -9,9 +9,10 @@ from discord.ext import commands, tasks
 
 from .client import AmcClient, ShowtimeError
 from .config import Settings
-from .formatter import listing_to_embed_payloads, schedule_to_embed_payloads
+from .formatter import listing_to_embed_payloads, schedule_to_embed_payloads, seat_map_to_embed_payloads
 from .fandango import today_in
 from .models import TheatreDay, TheatreSchedule
+from .seats import SeatLookupError
 from .theatres import DAILY_THEATRES, THEATRES, get_theatre
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,9 @@ log = logging.getLogger(__name__)
 THEATER_CHOICES = [
     app_commands.Choice(name="Fresh Meadows + Bay Terrace", value="all"),
     *[app_commands.Choice(name=theatre.name, value=theatre.key) for theatre in THEATRES],
+]
+SEAT_THEATER_CHOICES = [
+    app_commands.Choice(name=theatre.name, value=theatre.key) for theatre in THEATRES
 ]
 
 
@@ -57,6 +61,7 @@ class ShowtimesBot(commands.Bot):
     async def setup_hook(self) -> None:
         self.tree.add_command(showtimes)
         self.tree.add_command(coming)
+        self.tree.add_command(seats)
         guild_id = self.settings.discord_guild_id
         if guild_id:
             guild = discord.Object(id=guild_id)
@@ -180,6 +185,130 @@ async def coming(
         embeds = _embeds_from_schedule(schedule)
         for batch in _chunks(embeds, 10):
             await interaction.followup.send(embeds=batch)
+
+
+@app_commands.command(
+    name="seats",
+    description="Show a read-only Fandango seat map for an on-sale showtime",
+)
+@app_commands.describe(
+    theater="Theater (required)",
+    movie="Movie title, or enough of it to match",
+    time="Showtime like 7:30 PM",
+    date="Date as YYYY-MM-DD (defaults to today)",
+    format="Optional format if two screens share the time, for example IMAX",
+)
+@app_commands.choices(theater=SEAT_THEATER_CHOICES)
+async def seats(
+    interaction: discord.Interaction,
+    theater: app_commands.Choice[str],
+    movie: str,
+    time: str,
+    date: str | None = None,
+    format: str | None = None,
+) -> None:
+    await interaction.response.defer()
+    bot = interaction.client
+    if not isinstance(bot, ShowtimesBot):
+        await interaction.followup.send("Bot is not ready.")
+        return
+    try:
+        day = _parse_optional_date(date)
+    except ValueError:
+        await interaction.followup.send("Date must be YYYY-MM-DD, for example `2026-08-20`.")
+        return
+    try:
+        movie_listing, show, seat_map = await bot.amc.fetch_seat_map(
+            theater.value, movie, time, day, format
+        )
+    except SeatLookupError as exc:
+        await interaction.followup.send(str(exc))
+        return
+    except ShowtimeError as exc:
+        log.exception("seats command failed")
+        await interaction.followup.send(f"Could not load the seat map: {exc}")
+        return
+    except Exception:
+        log.exception("seats command failed")
+        await interaction.followup.send("Could not load the seat map.")
+        return
+
+    theatre = get_theatre(theater.value)
+    embeds = _embeds_from_payloads(
+        seat_map_to_embed_payloads(theatre, movie_listing, show, seat_map)
+    )
+    for batch in _chunks(embeds, 10):
+        await interaction.followup.send(embeds=batch)
+
+
+@seats.autocomplete("movie")
+async def seats_movie_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    bot = interaction.client
+    if not isinstance(bot, ShowtimesBot):
+        return []
+    theater = getattr(interaction.namespace, "theater", None)
+    date_raw = getattr(interaction.namespace, "date", None)
+    if not theater:
+        return []
+    try:
+        day = _parse_optional_date(date_raw) if date_raw else None
+        listing = await bot.amc.fetch(str(theater), day, remaining_only=True)
+    except Exception:
+        return []
+    needle = current.casefold()
+    titles = [movie.title for movie in listing.movies if movie.showtimes]
+    if needle:
+        titles = [title for title in titles if needle in title.casefold()]
+    return [app_commands.Choice(name=title[:100], value=title[:100]) for title in titles[:25]]
+
+
+@seats.autocomplete("time")
+async def seats_time_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    bot = interaction.client
+    if not isinstance(bot, ShowtimesBot):
+        return []
+    theater = getattr(interaction.namespace, "theater", None)
+    movie_query = getattr(interaction.namespace, "movie", None)
+    date_raw = getattr(interaction.namespace, "date", None)
+    if not theater or not movie_query:
+        return []
+    try:
+        day = _parse_optional_date(date_raw) if date_raw else None
+        listing = await bot.amc.fetch(str(theater), day, remaining_only=True)
+    except Exception:
+        return []
+    needle = current.casefold().replace(" ", "")
+    choices: list[app_commands.Choice[str]] = []
+    seen: set[str] = set()
+    for movie in listing.movies:
+        if movie_query.casefold() not in movie.title.casefold():
+            continue
+        for show in movie.showtimes:
+            if not show.buyable:
+                continue
+            stamp = _format_choice_clock(show.time_local)
+            label = stamp if show.format_name in {"", "Standard"} else f"{stamp} · {show.format_name}"
+            if label in seen:
+                continue
+            if needle and needle not in label.casefold().replace(" ", ""):
+                continue
+            seen.add(label)
+            choices.append(app_commands.Choice(name=label[:100], value=stamp))
+            if len(choices) >= 25:
+                return choices
+    return choices
+
+
+def _format_choice_clock(value: datetime) -> str:
+    hour = value.hour % 12 or 12
+    suffix = "AM" if value.hour < 12 else "PM"
+    return f"{hour}:{value.minute:02d} {suffix}"
 
 
 def _embeds_from_schedule(schedule: TheatreSchedule) -> list[discord.Embed]:

@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime
 
-from .models import MovieListing, ScheduledMovie, Theatre, TheatreDay, TheatreSchedule
+from .models import MovieListing, ScheduledMovie, Showtime, Theatre, TheatreDay, TheatreSchedule
+from .seats import SeatMap, render_seat_map_text
 from .watch import WatchedShowtime
 
 # Discord embed limits (leave headroom for formatting)
@@ -113,6 +114,32 @@ def listings_to_text(listings: list[TheatreDay], *, remaining_only: bool = True)
             lines.extend(blocks)
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
+
+
+def seat_map_to_embed_payloads(
+    theatre: Theatre,
+    movie: MovieListing,
+    show: Showtime,
+    seat_map: SeatMap,
+) -> list[dict]:
+    heading = (
+        f"{theatre.name} — {movie.title} · {_format_clock(show.time_local)}"
+    )
+    body = render_seat_map_text(seat_map)
+    if show.format_name:
+        body = f"{show.format_name}\n{body}"
+    wrapped = f"```\n{body}\n```"
+    if len(wrapped) > MAX_DESCRIPTION:
+        wrapped = f"```\n{body[: MAX_DESCRIPTION - 20]}\n```"
+        wrapped = wrapped[:MAX_DESCRIPTION]
+    return [
+        _embed(
+            heading,
+            wrapped,
+            theatre.showtimes_url(show.time_local.date()),
+            f"{theatre.name} · read-only Fandango map",
+        )
+    ]
 
 
 def _chunk_embeds(heading: str, blocks: list[str], url: str, footer: str) -> list[dict]:

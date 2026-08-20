@@ -34,12 +34,40 @@ def main() -> None:
         action="store_true",
         help="Include showtimes that have already started",
     )
+    parser.add_argument(
+        "--seats",
+        action="store_true",
+        help="Print a read-only Fandango seat map (requires --movie and --time)",
+    )
+    parser.add_argument("--movie", help="Movie title for --seats")
+    parser.add_argument("--time", help="Showtime for --seats, like 7:30 PM")
+    parser.add_argument("--format", help="Optional format for --seats, like IMAX")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     theatres = list(DAILY_THEATRES) if args.theater == "all" else [get_theatre(args.theater)]
     settings = Settings.from_env(require_discord=False)
     client = AmcClient(settings)
+    if args.seats:
+        if args.theater == "all" or len(theatres) != 1:
+            raise SystemExit("--seats needs --theater for one theater")
+        if not args.movie or not args.time:
+            raise SystemExit("--seats needs --movie and --time")
+        from .client import ShowtimeError
+        from .seats import SeatLookupError, render_seat_map_text
+
+        day = _parse_date(args.date) if args.date else None
+        try:
+            movie, show, seat_map = asyncio.run(
+                client.fetch_seat_map(
+                    theatres[0], args.movie, args.time, day, args.format
+                )
+            )
+        except (SeatLookupError, ShowtimeError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"{theatres[0].name} — {movie.title} · {args.time}")
+        print(render_seat_map_text(seat_map))
+        return
     if args.coming or args.through:
         start = today_in(theatres[0].timezone)
         end = _parse_date(args.through) if args.through else None
