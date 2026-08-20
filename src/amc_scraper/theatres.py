@@ -31,6 +31,7 @@ LINCOLN_SQUARE = Theatre(
 )
 
 THEATRES: tuple[Theatre, ...] = (FRESH_MEADOWS, BAY_TERRACE, LINCOLN_SQUARE)
+DAILY_THEATRES: tuple[Theatre, ...] = (FRESH_MEADOWS, BAY_TERRACE)
 THEATRES_BY_KEY = {theatre.key: theatre for theatre in THEATRES}
 
 

@@ -25,8 +25,6 @@ class Settings:
     amc_vendor_key: str | None
     cache_ttl_seconds: int = 300
     inter_theatre_delay: float = 0.75
-    watch_theatre: str = "lincoln-square"
-    watch_interval_seconds: int = 60
     user_agent: str = USER_AGENT
 
     @classmethod
@@ -55,6 +53,4 @@ class Settings:
             timezone=tz,
             amc_vendor_key=vendor_key,
             cache_ttl_seconds=ttl,
-            watch_theatre=os.getenv("WATCH_THEATRE", "lincoln-square").strip() or "lincoln-square",
-            watch_interval_seconds=int(os.getenv("WATCH_INTERVAL_SECONDS", "60")),
         )

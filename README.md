@@ -1,6 +1,6 @@
 # amc-scraper
 
-Discord bot that posts daily showtimes for **AMC Fresh Meadows 7**, **AMC Bay Terrace 6**, and **AMC Lincoln Square 13**, and answers `/showtimes` and `/coming` on demand. It also watches Lincoln Square about once a minute and pings Discord when any new showtime appears.
+Discord bot that posts daily showtimes for **AMC Fresh Meadows 7** and **AMC Bay Terrace 6**, and answers `/showtimes` and `/coming` on demand. **AMC Lincoln Square 13** is still in those commands if you pick it; it is not on the 9 AM post and is not polled.
 
 ## Data source
 
@@ -76,7 +76,7 @@ Keep that process running. Slash commands need a connected gateway, and the dail
 
 | Option | Meaning |
 | --- | --- |
-| `theater` | One configured theater, or all (default: all of them) |
+| `theater` | Fresh Meadows, Bay Terrace, Lincoln Square, or all (default: the two Queens theaters) |
 | `date` | `YYYY-MM-DD` (defaults to today in `America/New_York`) |
 
 ### `/coming`
@@ -85,35 +85,23 @@ Unique movies scheduled from today as far ahead as AMC/Fandango has dates (no du
 
 | Option | Meaning |
 | --- | --- |
-| `theater` | One configured theater, or all (default: all of them) |
+| `theater` | Fresh Meadows, Bay Terrace, Lincoln Square, or all (default: the two Queens theaters) |
 | `through` | Optional last date as `YYYY-MM-DD` if you want to stop early |
 
 The first run can take a minute while it walks the calendar. Results are cached for a few hours.
 
-The daily 9 AM post is still **today’s showtimes only**.
+The daily 9 AM post is **today’s showtimes** for Fresh Meadows and Bay Terrace only.
 
-### Lincoln Square watcher
-
-The bot polls **AMC Lincoln Square 13 only** about every 60 seconds (`WATCH_INTERVAL_SECONDS`) using Fandango’s theater calendar, then showtimes for those dates. Fresh Meadows and Bay Terrace are not watched.
-
-- First successful poll writes a buyable-only baseline to `data/seen_showtimes.json` and does **not** ping Discord.
-- Later polls `@here` the channel when a Lincoln Square showtime becomes **buyable** on Fandango (`type: available`), not when a grayed-out placeholder listing first appears.
-- HTTP 403/429 backs off for 10 minutes. If a scan is still running, the next tick is skipped.
-- That seen file is gitignored so a GCP restart does not re-spam the channel. After this buyable change, the first poll rebases that file (no ping).
-
-```
-WATCH_THEATRE=lincoln-square
-WATCH_INTERVAL_SECONDS=60
-```
+Lincoln Square stays on `/showtimes` and `/coming` (pick **AMC Lincoln Square 13**, or `./showtimes --theater lincoln-square`). It is not watched and not included in the daily post.
 
 ```bash
 ./showtimes --coming --theater lincoln-square
-./showtimes --coming
+./showtimes --theater lincoln-square
 ```
 
 ## Change or add theaters
 
-Theater list lives in [`src/amc_scraper/theatres.py`](src/amc_scraper/theatres.py). The `/showtimes` menu, CLI `--theater` flag, and daily post all read from `THEATRES` there.
+Theater list lives in [`src/amc_scraper/theatres.py`](src/amc_scraper/theatres.py). The `/showtimes` menu and CLI `--theater` flag read from `THEATRES`. The daily 9 AM post uses `DAILY_THEATRES` (Fresh Meadows and Bay Terrace).
 
 ### Replace one of the current theaters
 

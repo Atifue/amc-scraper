@@ -9,7 +9,7 @@ from .client import AmcClient
 from .config import Settings
 from .fandango import today_in
 from .formatter import listings_to_text, schedules_to_text
-from .theatres import THEATRES, get_theatre
+from .theatres import DAILY_THEATRES, THEATRES, get_theatre
 
 
 def main() -> None:
@@ -37,7 +37,7 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    theatres = list(THEATRES) if args.theater == "all" else [get_theatre(args.theater)]
+    theatres = list(DAILY_THEATRES) if args.theater == "all" else [get_theatre(args.theater)]
     settings = Settings.from_env(require_discord=False)
     client = AmcClient(settings)
     if args.coming or args.through:
