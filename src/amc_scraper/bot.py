@@ -13,7 +13,7 @@ from .formatter import listing_to_embed_payloads, schedule_to_embed_payloads, se
 from .fandango import today_in
 from .models import TheatreDay, TheatreSchedule
 from .seats import SeatLookupError
-from .theatres import DAILY_THEATRES, THEATRES, get_theatre
+from .theatres import DAILY_THEATRES, THEATRES, THEATRES_BY_KEY, get_theatre
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,14 @@ class ShowtimesBot(commands.Bot):
     async def on_ready(self) -> None:
         user = self.user
         log.info("Logged in as %s (%s)", user, user.id if user else "?")
+        self.loop.create_task(self._prefetch_today(), name="prefetch-showtimes")
+
+    async def _prefetch_today(self) -> None:
+        for theatre in THEATRES:
+            try:
+                await self.amc.fetch(theatre, remaining_only=True)
+            except Exception:
+                log.warning("Prefetch failed for %s", theatre.key, exc_info=True)
 
     @tasks.loop(time=dt_time(hour=9, minute=0))
     async def daily_showtimes(self) -> None:
@@ -246,23 +254,21 @@ async def seats_movie_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    bot = interaction.client
-    if not isinstance(bot, ShowtimesBot):
-        return []
-    theater = getattr(interaction.namespace, "theater", None)
-    date_raw = getattr(interaction.namespace, "date", None)
-    if not theater:
-        return []
     try:
-        day = _parse_optional_date(date_raw) if date_raw else None
-        listing = await bot.amc.fetch(str(theater), day, remaining_only=True)
+        listing = _seats_listing_for_autocomplete(interaction)
+        if listing is None:
+            return []
+        needle = current.casefold()
+        titles = [movie.title for movie in listing.movies if movie.showtimes]
+        if needle:
+            titles = [title for title in titles if needle in title.casefold()]
+        return [
+            app_commands.Choice(name=title[:100], value=title[:100])
+            for title in titles[:25]
+        ]
     except Exception:
+        log.exception("seats movie autocomplete failed")
         return []
-    needle = current.casefold()
-    titles = [movie.title for movie in listing.movies if movie.showtimes]
-    if needle:
-        titles = [title for title in titles if needle in title.casefold()]
-    return [app_commands.Choice(name=title[:100], value=title[:100]) for title in titles[:25]]
 
 
 @seats.autocomplete("time")
@@ -270,39 +276,76 @@ async def seats_time_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
+    try:
+        listing = _seats_listing_for_autocomplete(interaction)
+        movie_query = _namespace_str(getattr(interaction.namespace, "movie", None))
+        if listing is None or not movie_query:
+            return []
+        needle = current.casefold().replace(" ", "")
+        choices: list[app_commands.Choice[str]] = []
+        seen: set[str] = set()
+        for movie in listing.movies:
+            if movie_query.casefold() not in movie.title.casefold():
+                continue
+            for show in movie.showtimes:
+                if not show.buyable:
+                    continue
+                stamp = _format_choice_clock(show.time_local)
+                label = (
+                    stamp
+                    if show.format_name in {"", "Standard"}
+                    else f"{stamp} · {show.format_name}"
+                )[:100]
+                if label in seen:
+                    continue
+                if needle and needle not in label.casefold().replace(" ", ""):
+                    continue
+                seen.add(label)
+                choices.append(app_commands.Choice(name=label, value=stamp[:100]))
+                if len(choices) >= 25:
+                    return choices
+        return choices
+    except Exception:
+        log.exception("seats time autocomplete failed")
+        return []
+
+
+def _seats_listing_for_autocomplete(interaction: discord.Interaction):
     bot = interaction.client
     if not isinstance(bot, ShowtimesBot):
-        return []
-    theater = getattr(interaction.namespace, "theater", None)
-    movie_query = getattr(interaction.namespace, "movie", None)
-    date_raw = getattr(interaction.namespace, "date", None)
-    if not theater or not movie_query:
-        return []
+        return None
+    theatre_key = _namespace_theatre_key(getattr(interaction.namespace, "theater", None))
+    if not theatre_key:
+        return None
+    date_raw = _namespace_str(getattr(interaction.namespace, "date", None))
     try:
         day = _parse_optional_date(date_raw) if date_raw else None
-        listing = await bot.amc.fetch(str(theater), day, remaining_only=True)
-    except Exception:
-        return []
-    needle = current.casefold().replace(" ", "")
-    choices: list[app_commands.Choice[str]] = []
-    seen: set[str] = set()
-    for movie in listing.movies:
-        if movie_query.casefold() not in movie.title.casefold():
-            continue
-        for show in movie.showtimes:
-            if not show.buyable:
-                continue
-            stamp = _format_choice_clock(show.time_local)
-            label = stamp if show.format_name in {"", "Standard"} else f"{stamp} · {show.format_name}"
-            if label in seen:
-                continue
-            if needle and needle not in label.casefold().replace(" ", ""):
-                continue
-            seen.add(label)
-            choices.append(app_commands.Choice(name=label[:100], value=stamp))
-            if len(choices) >= 25:
-                return choices
-    return choices
+    except ValueError:
+        day = None
+    return bot.amc.cached_listing(theatre_key, day, remaining_only=True)
+
+
+def _namespace_theatre_key(raw: object) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, app_commands.Choice):
+        raw = raw.value
+    text = str(raw).strip()
+    if text in THEATRES_BY_KEY:
+        return text
+    for theatre in THEATRES:
+        if theatre.name == text:
+            return theatre.key
+    return None
+
+
+def _namespace_str(raw: object) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, app_commands.Choice):
+        raw = raw.value
+    text = str(raw).strip()
+    return text or None
 
 
 def _format_choice_clock(value: datetime) -> str:

@@ -53,6 +53,24 @@ class AmcClient:
         self._store_cached(theatre, day, listing)
         return self._filter(listing, remaining_only)
 
+    def cached_listing(
+        self,
+        theatre: Theatre | str,
+        day: date | None = None,
+        *,
+        remaining_only: bool = True,
+    ) -> TheatreDay | None:
+        if isinstance(theatre, str):
+            try:
+                theatre = get_theatre(theatre)
+            except KeyError:
+                return None
+        day = day or today_in(theatre.timezone)
+        cached = self._get_cached(theatre, day)
+        if cached is None:
+            return None
+        return self._filter(cached, remaining_only)
+
     async def fetch_many(
         self,
         theatres: list[Theatre] | None = None,
