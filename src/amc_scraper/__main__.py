@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 from datetime import date, datetime
+from pathlib import Path
 
 from .client import AmcClient
 from .config import Settings
@@ -37,7 +38,7 @@ def main() -> None:
     parser.add_argument(
         "--seats",
         action="store_true",
-        help="Print a read-only Fandango seat map (requires --movie and --time)",
+        help="Write a read-only Fandango seat map PNG (requires --movie and --time)",
     )
     parser.add_argument("--movie", help="Movie title for --seats")
     parser.add_argument("--time", help="Showtime for --seats, like 7:30 PM")
@@ -54,7 +55,7 @@ def main() -> None:
         if not args.movie or not args.time:
             raise SystemExit("--seats needs --movie and --time")
         from .client import ShowtimeError
-        from .seats import SeatLookupError, render_seat_map_text
+        from .seats import SeatLookupError, render_seat_map_png, render_seat_map_summary
 
         day = _parse_date(args.date) if args.date else None
         try:
@@ -66,7 +67,10 @@ def main() -> None:
         except (SeatLookupError, ShowtimeError) as exc:
             raise SystemExit(str(exc)) from exc
         print(f"{theatres[0].name} — {movie.title} · {args.time}")
-        print(render_seat_map_text(seat_map))
+        print(render_seat_map_summary(seat_map).replace("**", ""))
+        out = Path("seats.png")
+        out.write_bytes(render_seat_map_png(seat_map))
+        print(f"Wrote {out.resolve()}")
         return
     if args.coming or args.through:
         start = today_in(theatres[0].timezone)

@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import date, datetime
 
 from .models import MovieListing, ScheduledMovie, Showtime, Theatre, TheatreDay, TheatreSchedule
-from .seats import SeatMap, render_seat_map_text
+from .seats import SeatMap, render_seat_map_summary
 from .watch import WatchedShowtime
 
 # Discord embed limits (leave headroom for formatting)
@@ -125,21 +125,17 @@ def seat_map_to_embed_payloads(
     heading = (
         f"{theatre.name} — {movie.title} · {_format_clock(show.time_local)}"
     )
-    body = render_seat_map_text(seat_map)
+    body = render_seat_map_summary(seat_map)
     if show.format_name:
         body = f"{show.format_name}\n{body}"
-    wrapped = f"```\n{body}\n```"
-    if len(wrapped) > MAX_DESCRIPTION:
-        wrapped = f"```\n{body[: MAX_DESCRIPTION - 20]}\n```"
-        wrapped = wrapped[:MAX_DESCRIPTION]
-    return [
-        _embed(
-            heading,
-            wrapped,
-            theatre.showtimes_url(show.time_local.date()),
-            f"{theatre.name} · read-only Fandango map",
-        )
-    ]
+    payload = _embed(
+        heading,
+        body,
+        theatre.showtimes_url(show.time_local.date()),
+        f"{theatre.name} · read-only Fandango map",
+    )
+    payload["image"] = {"url": "attachment://seats.png"}
+    return [payload]
 
 
 def _chunk_embeds(heading: str, blocks: list[str], url: str, footer: str) -> list[dict]:

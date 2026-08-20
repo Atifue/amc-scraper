@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import logging
 from datetime import date, datetime, time as dt_time
 
@@ -12,7 +13,7 @@ from .config import Settings
 from .formatter import listing_to_embed_payloads, schedule_to_embed_payloads, seat_map_to_embed_payloads
 from .fandango import today_in
 from .models import TheatreDay, TheatreSchedule
-from .seats import SeatLookupError
+from .seats import SeatLookupError, render_seat_map_png
 from .theatres import DAILY_THEATRES, THEATRES, THEATRES_BY_KEY, get_theatre
 
 log = logging.getLogger(__name__)
@@ -38,6 +39,9 @@ def _embeds_from_payloads(payloads: list[dict]) -> list[discord.Embed]:
         footer = payload.get("footer") or {}
         if footer.get("text"):
             embed.set_footer(text=footer["text"])
+        image = payload.get("image") or {}
+        if image.get("url"):
+            embed.set_image(url=image["url"])
         embeds.append(embed)
     return embeds
 
@@ -245,8 +249,9 @@ async def seats(
     embeds = _embeds_from_payloads(
         seat_map_to_embed_payloads(theatre, movie_listing, show, seat_map)
     )
-    for batch in _chunks(embeds, 10):
-        await interaction.followup.send(embeds=batch)
+    png = render_seat_map_png(seat_map)
+    image = discord.File(io.BytesIO(png), filename="seats.png")
+    await interaction.followup.send(embed=embeds[0], file=image)
 
 
 @seats.autocomplete("movie")

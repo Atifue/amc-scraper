@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time
+from io import BytesIO
+from pathlib import Path
 
 from .models import MovieListing, Showtime, TheatreDay
 
@@ -22,6 +24,11 @@ class Seat:
     available: bool
     wheelchair: bool
     label: str
+    number: int | None = None
+    x: float | None = None
+    y: float | None = None
+    width: float = 24.0
+    height: float = 24.0
 
 
 @dataclass
@@ -120,8 +127,14 @@ def parse_seat_map(payload: dict) -> SeatMap:
                 available=str(raw.get("status") or "").upper() == "A",
                 wheelchair=wheelchair,
                 label=label,
+                number=_seat_number(label),
+                x=_as_float(raw.get("x")),
+                y=_as_float(raw.get("y")),
+                width=_as_float(raw.get("width")) or 24.0,
+                height=_as_float(raw.get("height")) or 24.0,
             )
         )
+    seats = _snap_shared_rows(seats)
     seats.sort(key=lambda seat: (seat.layout_row, seat.column))
     available = sum(1 for seat in seats if seat.available)
     total = int(payload.get("totalSeatCount") or len(seats))
@@ -133,36 +146,202 @@ def parse_seat_map(payload: dict) -> SeatMap:
     )
 
 
-def render_seat_map_text(seat_map: SeatMap) -> str:
-    if not seat_map.seats:
-        return "No seats in the Fandango map."
-    by_row: dict[int, list[Seat]] = defaultdict(list)
-    labels: dict[int, str] = {}
-    for seat in seat_map.seats:
-        by_row[seat.layout_row].append(seat)
-        labels[seat.layout_row] = seat.display_row
-    columns = [seat.column for seat in seat_map.seats]
-    min_col, max_col = min(columns), max(columns)
-    row_width = max(len(labels[row]) for row in by_row)
-    compact = (max_col - min_col) > 22
-    lines = ["SCREEN"]
-    for layout_row in sorted(by_row):
-        present = {seat.column: seat for seat in by_row[layout_row]}
-        cells: list[str] = []
-        for column in range(min_col, max_col + 1):
-            cells.append(_glyph(present.get(column)))
-            if not compact and column < max_col and (column - min_col + 1) % 4 == 0:
-                cells.append(" ")
-        lines.append(f"{labels[layout_row]:>{row_width}} {''.join(cells).rstrip()}")
-    groups = _open_groups(seat_map, limit=5)
+def render_seat_map_png(seat_map: SeatMap) -> bytes:
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required to draw seat maps") from exc
+
+    seats = seat_map.seats
+    if not seats:
+        image = Image.new("RGB", (640, 200), "#111114")
+        ImageDraw.Draw(image).text((24, 88), "No seats in the Fandango map.", fill="#d0d0d6")
+        return _png_bytes(image)
+
+    placed = _seats_with_geometry(seats)
+    min_x = min(seat.x or 0 for seat in placed)
+    min_y = min(seat.y or 0 for seat in placed)
+    max_x = max((seat.x or 0) + seat.width for seat in placed)
+    max_y = max((seat.y or 0) + seat.height for seat in placed)
+    src_w = max(max_x - min_x, 1)
+    src_h = max(max_y - min_y, 1)
+
+    label_w = 52
+    pad = 36
+    screen_h = 28
+    legend_h = 44
+    target_w = 1400
+    scale = (target_w - pad * 2 - label_w * 2) / src_w
+    map_h = src_h * scale
+    if map_h > 980:
+        scale *= 980 / map_h
+        map_h = 980
+    img_w = int(pad * 2 + label_w * 2 + src_w * scale)
+    img_h = int(pad + 8 + screen_h + 28 + map_h + pad + legend_h)
+
+    image = Image.new("RGB", (img_w, img_h), "#0f0f13")
+    draw = ImageDraw.Draw(image)
+    title_font = _font(16, bold=True)
+    row_font = _font(18, bold=True)
+    number_font = _font(15, bold=True)
+    legend_font = _font(14)
+
+    origin_x = pad + label_w
+    origin_y = pad + 8 + screen_h + 28
+    map_right = origin_x + src_w * scale
+
+    _draw_screen(draw, origin_x, map_right, pad + 6, screen_h, title_font)
+
+    row_ys: dict[str, list[float]] = defaultdict(list)
+    for seat in placed:
+        x0 = origin_x + ((seat.x or 0) - min_x) * scale
+        y0 = origin_y + ((seat.y or 0) - min_y) * scale
+        x1 = x0 + seat.width * scale
+        y1 = y0 + seat.height * scale
+        _draw_seat(draw, seat, x0, y0, x1, y1, number_font)
+        row_ys[seat.display_row].append((y0 + y1) / 2)
+
+    for row, mids in row_ys.items():
+        mid = sum(mids) / len(mids)
+        tw = _text_width(draw, row, row_font)
+        draw.text((pad + (label_w - tw) / 2, mid - 10), row, fill="#c5c5ce", font=row_font)
+        draw.text((map_right + (label_w - tw) / 2, mid - 10), row, fill="#c5c5ce", font=row_font)
+
+    _draw_legend(draw, pad, img_h - pad - 6, legend_font)
+    return _png_bytes(image)
+
+
+def render_seat_map_summary(seat_map: SeatMap) -> str:
+    groups = _open_groups(seat_map, limit=4)
     group_text = ", ".join(groups) if groups else "none"
-    legend = "□ open  ☒ taken  ▣ wheelchair  ▦ taken wheelchair"
     return (
-        f"{seat_map.available}/{seat_map.total} open\n"
-        f"Biggest open blocks: {group_text}\n"
-        f"{legend}\n\n"
-        + "\n".join(lines)
+        f"**{seat_map.available}/{seat_map.total} open**\n"
+        f"Green = open · Gray = taken · Blue = wheelchair\n"
+        f"Biggest open blocks: {group_text}"
     )
+
+
+def _seats_with_geometry(seats: list[Seat]) -> list[Seat]:
+    if all(seat.x is not None and seat.y is not None for seat in seats):
+        return seats
+    gap = 6.0
+    size = 22.0
+    by_row: dict[int, list[Seat]] = defaultdict(list)
+    for seat in seats:
+        by_row[seat.layout_row].append(seat)
+    placed: list[Seat] = []
+    for r_index, layout_row in enumerate(sorted(by_row)):
+        row_seats = sorted(by_row[layout_row], key=lambda item: item.column)
+        for c_index, seat in enumerate(row_seats):
+            placed.append(
+                replace(
+                    seat,
+                    x=c_index * (size + gap),
+                    y=r_index * (size + gap),
+                    width=size,
+                    height=size,
+                )
+            )
+    return placed
+
+
+def _draw_screen(draw, left: float, right: float, top: float, height: float, font) -> None:
+    inset = (right - left) * 0.05
+    draw.polygon(
+        [
+            (left + inset, top),
+            (right - inset, top),
+            (right, top + height),
+            (left, top + height),
+        ],
+        fill="#ececf1",
+    )
+    label = "SCREEN"
+    tw = _text_width(draw, label, font)
+    draw.text(((left + right - tw) / 2, top + 6), label, fill="#1b1b20", font=font)
+
+
+def _draw_seat(draw, seat: Seat, x0: float, y0: float, x1: float, y1: float, font) -> None:
+    width = x1 - x0
+    height = y1 - y0
+    radius = max(4, int(min(width, height) * 0.32))
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=_seat_color(seat))
+    label = "" if seat.number is None else str(seat.number)
+    if not label or width < 22 or height < 18:
+        return
+    tw = _text_width(draw, label, font)
+    box = draw.textbbox((0, 0), label, font=font)
+    th = box[3] - box[1]
+    draw.text(
+        (x0 + (width - tw) / 2, y0 + (height - th) / 2 - box[1]),
+        label,
+        fill=_seat_text_color(seat),
+        font=font,
+    )
+
+
+def _seat_color(seat: Seat) -> str:
+    if seat.wheelchair:
+        return "#5eb0ff" if seat.available else "#3d5a78"
+    return "#3ee08c" if seat.available else "#4a4a54"
+
+
+def _seat_text_color(seat: Seat) -> str:
+    if seat.available:
+        return "#082016" if not seat.wheelchair else "#071625"
+    return "#f4f6fa"
+
+
+def _draw_legend(draw, x: int, y: int, font) -> None:
+    items = [
+        ("#3ee08c", "Open"),
+        ("#4a4a54", "Taken"),
+        ("#5eb0ff", "Wheelchair"),
+    ]
+    cursor = x
+    for color, label in items:
+        draw.rounded_rectangle((cursor, y - 10, cursor + 16, y + 6), radius=5, fill=color)
+        draw.text((cursor + 22, y - 11), label, fill="#c8c8d0", font=font)
+        cursor += 108
+
+
+def _font(size: int, *, bold: bool = False):
+    from PIL import ImageFont
+
+    regular = (
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/SFNS.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    )
+    bold_paths = (
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    )
+    paths = bold_paths + regular if bold else regular
+    for path in paths:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
+
+
+def _text_width(draw, text: str, font) -> float:
+    box = draw.textbbox((0, 0), text, font=font)
+    return box[2] - box[0]
+
+
+def _png_bytes(image) -> bytes:
+    buffer = BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _matching_movies(movies: list[MovieListing], query: str) -> list[MovieListing]:
@@ -184,33 +363,51 @@ def _matching_movies(movies: list[MovieListing], query: str) -> list[MovieListin
 def _display_row(label: str, layout_row: int) -> str:
     match = _ROW_LETTER_RE.match(label)
     if match:
-        return match.group(1).upper()
+        prefix = match.group(1).upper()
+        if prefix and prefix != "WC":
+            return prefix
     return str(layout_row)
 
 
-def _glyph(seat: Seat | None) -> str:
-    if seat is None:
-        return " "
-    if seat.wheelchair:
-        return "▣" if seat.available else "▦"
-    return "□" if seat.available else "☒"
+def _seat_number(label: str) -> int | None:
+    match = re.search(r"(\d+)$", label)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _snap_shared_rows(seats: list[Seat]) -> list[Seat]:
+    anchors = [seat for seat in seats if seat.y is not None and seat.display_row.isalpha()]
+    if not anchors:
+        return seats
+    snapped: list[Seat] = []
+    for seat in seats:
+        if seat.y is None or seat.display_row.isalpha():
+            snapped.append(seat)
+            continue
+        nearest = min(anchors, key=lambda other: abs((other.y or 0) - seat.y))
+        if abs((nearest.y or 0) - seat.y) <= max(seat.height, 20.0):
+            snapped.append(replace(seat, display_row=nearest.display_row))
+        else:
+            snapped.append(seat)
+    return snapped
 
 
 def _open_groups(seat_map: SeatMap, *, limit: int) -> list[str]:
     by_row: dict[str, list[int]] = defaultdict(list)
     for seat in seat_map.seats:
-        if seat.available:
-            by_row[seat.display_row].append(seat.column)
+        if seat.available and seat.number is not None:
+            by_row[seat.display_row].append(seat.number)
     groups: list[tuple[int, str]] = []
-    for row, columns in by_row.items():
-        columns.sort()
-        start = prev = columns[0]
-        for column in columns[1:]:
-            if column == prev + 1:
-                prev = column
+    for row, numbers in by_row.items():
+        numbers.sort()
+        start = prev = numbers[0]
+        for number in numbers[1:]:
+            if number == prev + 1:
+                prev = number
                 continue
             groups.append(_group_tuple(row, start, prev))
-            start = prev = column
+            start = prev = number
         groups.append(_group_tuple(row, start, prev))
     groups.sort(key=lambda item: (-item[0], item[1]))
     return [label for _, label in groups[:limit]]

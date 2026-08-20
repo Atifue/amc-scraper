@@ -9,3 +9,4 @@ build/
 .playwright-cli/
 *.log
 data/seen_showtimes.json
+seats.png
