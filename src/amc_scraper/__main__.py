@@ -66,7 +66,9 @@ def main() -> None:
             )
         except (SeatLookupError, ShowtimeError) as exc:
             raise SystemExit(str(exc)) from exc
-        print(f"{theatres[0].name} — {movie.title} · {args.time}")
+        clock = show.time_local.strftime("%I:%M %p").lstrip("0")
+        label = f"{clock} {show.format_name}".strip() if show.format_name else clock
+        print(f"{theatres[0].name} — {movie.title} · {label}")
         print(render_seat_map_summary(seat_map).replace("**", ""))
         out = Path("seats.png")
         out.write_bytes(render_seat_map_png(seat_map))

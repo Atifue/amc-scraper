@@ -10,3 +10,4 @@ build/
 *.log
 data/seen_showtimes.json
 seats.png
+.DS_Store

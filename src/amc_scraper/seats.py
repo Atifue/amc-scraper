@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, time
 from io import BytesIO
@@ -10,10 +11,11 @@ from pathlib import Path
 from .models import MovieListing, Showtime, TheatreDay
 
 _CLOCK_RE = re.compile(
-    r"^\s*(\d{1,2})(?::(\d{2}))?\s*(a|am|p|pm)?\s*$",
+    r"^(?P<hour>\d{1,2})(?:[:.h]?(?P<minute>\d{2}))?(?P<suffix>a|am|p|pm)?$",
     re.IGNORECASE,
 )
 _ROW_LETTER_RE = re.compile(r"^([A-Za-z]+)")
+_CLOCK_HELP = "Time must look like `7:30 PM`, `730pm`, `7pm`, or `19:30`."
 
 
 @dataclass(frozen=True)
@@ -43,33 +45,72 @@ class SeatLookupError(ValueError):
     pass
 
 
+def parse_clock_candidates(raw: str) -> tuple[time, ...]:
+    """Times a hand-typed query could mean.
+
+    `7:30 PM` is exact, but a bare `7:30` should still find the evening show
+    instead of failing, so both readings are returned when there is no am/pm.
+    """
+    clock, had_suffix = _parse_clock_parts(raw)
+    if had_suffix or not 1 <= clock.hour <= 11:
+        return (clock,)
+    return (clock, time(hour=clock.hour + 12, minute=clock.minute))
+
+
 def parse_clock_query(raw: str) -> time:
-    text = raw.strip().lower().replace(".", "")
-    text = text.replace(" ", "")
+    """Parse a hand-typed showtime.
+
+    Autocomplete is a convenience, not a requirement, so this accepts the
+    forms people actually type: `7:30 PM`, `730pm`, `7 30 pm`, `7pm`, `19:30`,
+    `1930`.
+    """
+    return _parse_clock_parts(raw)[0]
+
+
+def _parse_clock_parts(raw: str) -> tuple[time, bool]:
+    text = raw.strip().casefold()
+    # Drop separators and stray punctuation, but keep the am/pm letters.
+    text = re.sub(r"[\s_\-]", "", text)
+    text = text.replace("a.m", "am").replace("p.m", "pm")
+    text = text.rstrip(".")
+    # A bare 3 or 4 digit time (730, 1930) has no separator to key off of.
+    bare = re.fullmatch(r"(\d{3,4})(a|am|p|pm)?", text)
+    if bare:
+        digits = bare.group(1)
+        text = f"{digits[:-2]}:{digits[-2:]}{bare.group(2) or ''}"
+
     match = _CLOCK_RE.match(text)
     if not match:
-        raise SeatLookupError("Time must look like `7:30 PM` or `19:30`.")
-    hour = int(match.group(1))
-    minute = int(match.group(2) or "0")
-    suffix = (match.group(3) or "").lower()
+        raise SeatLookupError(_CLOCK_HELP)
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute") or "0")
+    suffix = (match.group("suffix") or "").casefold()
     if suffix in {"p", "pm"}:
+        if hour > 12:
+            raise SeatLookupError(_CLOCK_HELP)
         if hour != 12:
             hour += 12
     elif suffix in {"a", "am"}:
+        if hour > 12:
+            raise SeatLookupError(_CLOCK_HELP)
         if hour == 12:
             hour = 0
     if hour > 23 or minute > 59:
-        raise SeatLookupError("Time must look like `7:30 PM` or `19:30`.")
-    return time(hour=hour, minute=minute)
+        raise SeatLookupError(_CLOCK_HELP)
+    return time(hour=hour, minute=minute), bool(suffix)
 
 
 def match_buyable_showtime(
     listing: TheatreDay,
     movie_query: str,
-    clock: time,
+    clock: time | Sequence[time],
     format_query: str | None = None,
 ) -> tuple[MovieListing, Showtime]:
-    movies = _matching_movies(listing.movies, movie_query)
+    clocks = (clock,) if isinstance(clock, time) else tuple(clock)
+    if not clocks:
+        raise SeatLookupError(_CLOCK_HELP)
+
+    movies = matching_movies(listing.movies, movie_query)
     if not movies:
         known = ", ".join(movie.title for movie in listing.movies[:8]) or "none listed"
         raise SeatLookupError(f"No movie matching {movie_query!r}. Playing: {known}.")
@@ -78,10 +119,11 @@ def match_buyable_showtime(
         raise SeatLookupError(f"Movie is ambiguous. Be more specific: {titles}.")
 
     movie = movies[0]
+    wanted = {(item.hour, item.minute) for item in clocks}
     matches = [
         show
         for show in movie.showtimes
-        if show.time_local.hour == clock.hour and show.time_local.minute == clock.minute
+        if (show.time_local.hour, show.time_local.minute) in wanted
     ]
     if format_query:
         needle = format_query.casefold()
@@ -92,17 +134,43 @@ def match_buyable_showtime(
             or any(needle in item.casefold() for item in show.amenities)
         ]
     if not matches:
-        times = ", ".join(_format_clock(show.time_local) for show in movie.showtimes[:12]) or "none"
-        raise SeatLookupError(f"No {movie.title} showtime at that clock. Listed: {times}.")
+        raise SeatLookupError(_no_showtime_message(movie, format_query))
+
     buyable = [show for show in matches if show.buyable and show.showtime_hash]
     if not buyable:
         raise SeatLookupError(
-            "That showtime is not on sale yet, so Fandango has no seat map."
+            f"That {movie.title} showtime is listed but not on sale yet, "
+            "so Fandango has no seat map."
         )
+    hours = {show.time_local.hour for show in buyable}
+    if len(hours) > 1:
+        labels = ", ".join(
+            sorted({_format_clock(show.time_local) for show in buyable})
+        )
+        raise SeatLookupError(f"Add AM or PM. That clock matches {labels}.")
     if len(buyable) > 1:
         labels = " · ".join(show.format_name for show in buyable)
         raise SeatLookupError(f"Several formats at that time. Pass format: {labels}.")
     return movie, buyable[0]
+
+
+def _no_showtime_message(movie: MovieListing, format_query: str | None) -> str:
+    on_sale = sorted(
+        {_format_clock(show.time_local) for show in movie.showtimes if show.buyable}
+    )
+    if not on_sale:
+        listed = sorted({_format_clock(show.time_local) for show in movie.showtimes})
+        if not listed:
+            return f"{movie.title} has no showtimes left today."
+        return (
+            f"No {movie.title} showtimes are on sale yet. "
+            f"Listed: {', '.join(listed[:12])}."
+        )
+    extra = f" in {format_query}" if format_query else ""
+    return (
+        f"No {movie.title} showtime at that clock{extra}. "
+        f"On sale: {', '.join(on_sale[:12])}."
+    )
 
 
 def parse_seat_map(payload: dict) -> SeatMap:
@@ -344,7 +412,7 @@ def _as_float(value: object) -> float | None:
         return None
 
 
-def _matching_movies(movies: list[MovieListing], query: str) -> list[MovieListing]:
+def matching_movies(movies: list[MovieListing], query: str) -> list[MovieListing]:
     needle = query.strip().casefold()
     if not needle:
         return []

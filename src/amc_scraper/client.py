@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -11,7 +12,13 @@ from . import amc_api, amc_web
 from .config import Settings
 from .fandango import USER_AGENT, parse_fandango_payload, today_in
 from .models import MovieListing, ScheduledMovie, Showtime, Theatre, TheatreDay, TheatreSchedule
-from .seats import SeatLookupError, SeatMap, match_buyable_showtime, parse_clock_query, parse_seat_map
+from .seats import (
+    SeatLookupError,
+    SeatMap,
+    match_buyable_showtime,
+    parse_clock_candidates,
+    parse_seat_map,
+)
 from .theatres import THEATRES, get_theatre
 
 log = logging.getLogger(__name__)
@@ -33,6 +40,11 @@ class AmcClient:
         self.settings = settings or Settings.from_env(require_discord=False)
         self._cache: dict[tuple[str, str], tuple[float, TheatreDay]] = {}
         self._schedule_cache: dict[tuple[str, str, str], tuple[float, TheatreSchedule]] = {}
+        # Last successful listing per (theatre, day). This never expires while the
+        # process is alive, so autocomplete still has something to offer after the
+        # short-lived TTL cache goes cold.
+        self._last_good: dict[tuple[str, str], TheatreDay] = {}
+        self._inflight: dict[tuple[str, str], asyncio.Task[TheatreDay]] = {}
         self._cookies = httpx.Cookies()
         self._warmed: set[str] = set()
 
@@ -59,17 +71,102 @@ class AmcClient:
         day: date | None = None,
         *,
         remaining_only: bool = True,
+        allow_stale: bool = True,
     ) -> TheatreDay | None:
-        if isinstance(theatre, str):
-            try:
-                theatre = get_theatre(theatre)
-            except KeyError:
-                return None
+        theatre = self._resolve(theatre)
+        if theatre is None:
+            return None
         day = day or today_in(theatre.timezone)
         cached = self._get_cached(theatre, day)
+        if cached is None and allow_stale:
+            cached = self._last_good.get((theatre.key, day.isoformat()))
         if cached is None:
             return None
         return self._filter(cached, remaining_only)
+
+    async def listing_for_autocomplete(
+        self,
+        theatre: Theatre | str,
+        day: date | None = None,
+        *,
+        remaining_only: bool = True,
+        timeout: float = 2.0,
+    ) -> TheatreDay | None:
+        """Best-effort listing for Discord autocomplete.
+
+        Discord drops an autocomplete response after 3 seconds, so this never
+        blocks when any usable data exists:
+
+        1. fresh cache wins,
+        2. otherwise the last good snapshot is returned right away and a
+           refresh runs in the background,
+        3. only a completely cold theatre waits on the network, and only
+           briefly.
+        """
+        theatre = self._resolve(theatre)
+        if theatre is None:
+            return None
+        day = day or today_in(theatre.timezone)
+        fresh = self._get_cached(theatre, day)
+        if fresh is not None:
+            return self._filter(fresh, remaining_only)
+
+        task = self._refresh_task(theatre, day)
+        stale = self._last_good.get((theatre.key, day.isoformat()))
+        if stale is not None:
+            return self._filter(stale, remaining_only)
+
+        try:
+            # shield() so a timeout here does not cancel the shared refresh.
+            listing = await asyncio.wait_for(asyncio.shield(task), timeout)
+        except Exception as exc:
+            log.info(
+                "Cold autocomplete fetch failed for %s %s (%s)",
+                theatre.key,
+                day,
+                type(exc).__name__,
+            )
+            return None
+        return self._filter(listing, remaining_only)
+
+    def _refresh_task(self, theatre: Theatre, day: date) -> asyncio.Task[TheatreDay]:
+        """One in-flight fetch per (theatre, day), shared by every caller.
+
+        Autocomplete fires on each keystroke, so without this a few keystrokes
+        would become a burst of Fandango requests and earn a 403.
+        """
+        key = (theatre.key, day.isoformat())
+        task = self._inflight.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(self._fetch_and_store(theatre, day))
+            self._inflight[key] = task
+            task.add_done_callback(lambda done: self._finish_refresh(key, done))
+        return task
+
+    def _finish_refresh(self, key: tuple[str, str], task: asyncio.Task[TheatreDay]) -> None:
+        if self._inflight.get(key) is task:
+            self._inflight.pop(key, None)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            # Nobody may be awaiting a background refresh; retrieve the error
+            # here so asyncio does not log it as never-retrieved.
+            log.warning("Background listing refresh failed for %s %s: %s", key[0], key[1], exc)
+
+    async def _fetch_and_store(self, theatre: Theatre, day: date) -> TheatreDay:
+        listing = await self._fetch_uncached(theatre, day)
+        self._store_cached(theatre, day, listing)
+        return listing
+
+    @staticmethod
+    def _resolve(theatre: Theatre | str) -> Theatre | None:
+        if not isinstance(theatre, str):
+            return theatre
+        try:
+            return get_theatre(theatre)
+        except KeyError:
+            return None
 
     async def fetch_many(
         self,
@@ -98,10 +195,10 @@ class AmcClient:
     ) -> tuple[MovieListing, Showtime, SeatMap]:
         if isinstance(theatre, str):
             theatre = get_theatre(theatre)
-        clock = parse_clock_query(show_time)
+        clocks = parse_clock_candidates(show_time)
         listing = await self.fetch(theatre, day, remaining_only=True)
         movie_listing, show = match_buyable_showtime(
-            listing, movie, clock, format_name
+            listing, movie, clocks, format_name
         )
         if not show.showtime_hash:
             raise SeatLookupError(
@@ -450,10 +547,9 @@ class AmcClient:
 
     def _store_cached(self, theatre: Theatre, day: date, listing: TheatreDay) -> None:
         ttl = max(0, self.settings.cache_ttl_seconds)
-        self._cache[(theatre.key, day.isoformat())] = (
-            time.monotonic() + ttl,
-            listing,
-        )
+        key = (theatre.key, day.isoformat())
+        self._cache[key] = (time.monotonic() + ttl, listing)
+        self._last_good[key] = listing
 
     def _get_schedule_cached(
         self, theatre: Theatre, start: date, end: date | None
@@ -484,9 +580,14 @@ class AmcClient:
     def _filter(listing: TheatreDay, remaining_only: bool) -> TheatreDay:
         if not remaining_only:
             return listing
+        cutoff = _start_cutoff(listing)
         movies = []
         for movie in listing.movies:
-            remaining = [show for show in movie.showtimes if not show.expired]
+            remaining = [
+                show
+                for show in movie.showtimes
+                if not show.expired and show.time_local >= cutoff
+            ]
             if remaining:
                 movies.append(
                     MovieListing(
@@ -510,6 +611,19 @@ _MIN_SCAN_DAYS = 90
 _EMPTY_STOP_DAYS = 120
 _SCAN_BATCH_DAYS = 8
 _SCAN_CONCURRENCY = 2
+# Fandango keeps selling for a while after a show starts, so only treat a
+# showtime as gone once it is clearly past.
+_STARTED_GRACE_MINUTES = 20
+
+
+def _start_cutoff(listing: TheatreDay) -> datetime:
+    """Naive local cutoff used to drop showtimes that already started.
+
+    Fandango's own `expired` flag is baked in when the payload is parsed, so a
+    cached listing would keep offering showtimes as it ages.
+    """
+    now = datetime.now(ZoneInfo(listing.theatre.timezone)).replace(tzinfo=None)
+    return now - timedelta(minutes=_STARTED_GRACE_MINUTES)
 
 
 def _fandango_page_url(theatre: Theatre) -> str:
