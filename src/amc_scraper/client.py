@@ -133,6 +133,23 @@ class AmcClient:
             return None
         return self._filter(listing, remaining_only)
 
+    def prime_listing(
+        self,
+        theatre: Theatre | str,
+        day: date | None = None,
+    ) -> None:
+        """Start a background refresh without waiting.
+
+        Autocomplete must not await this. Discord's 3 second window is why
+        "Loading options failed" showed up when the cache was cold.
+        """
+        theatre = self._resolve(theatre)
+        if theatre is None:
+            return
+        day = day or today_in(theatre.timezone)
+        if self._get_cached(theatre, day) is None:
+            self._refresh_task(theatre, day)
+
     def _refresh_task(self, theatre: Theatre, day: date) -> asyncio.Task[TheatreDay]:
         """One in-flight fetch per (theatre, day), shared by every caller.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from collections.abc import Iterable
 from datetime import date, datetime, time as dt_time
 
 import discord
@@ -29,8 +30,8 @@ SEAT_THEATER_CHOICES = [
 # Keepalive for the autocomplete snapshot. Slow enough that Fandango does not
 # start answering 403 from the VM.
 AUTOCOMPLETE_REFRESH_MINUTES = 10
-# Discord drops an autocomplete response after 3 seconds.
-AUTOCOMPLETE_BUDGET_SECONDS = 2.0
+# Discord drops an autocomplete response after 3 seconds — never wait on
+# Fandango inside these handlers.
 # The upcoming window is a multi-day scan, so refresh it far less often.
 UPCOMING_REFRESH_HOURS = 6
 
@@ -328,10 +329,7 @@ async def seats_movie_autocomplete(
                 if previous is None or movie.first_date < previous:
                     first_day[movie.title] = movie.first_date
         ordered = sorted(first_day.items(), key=lambda item: (item[1], item[0].casefold()))
-        return [
-            app_commands.Choice(name=title[:100], value=title[:100])
-            for title, _day in ordered[:25]
-        ]
+        return _unique_choices((title, title) for title, _day in ordered)
     except Exception:
         log.exception("seats movie autocomplete failed")
         return []
@@ -343,12 +341,12 @@ async def seats_date_autocomplete(
     current: str,
 ) -> list[app_commands.Choice[str]]:
     try:
-        listings = await _seats_listings_for_autocomplete(interaction)
+        listings = _seats_listings_for_autocomplete(interaction)
         movie_query = _namespace_str(getattr(interaction.namespace, "movie", None))
         needle = current.casefold().replace(" ", "")
         today = today_in(THEATRES[0].timezone)
-        days: list[date] = []
-        seen: set[date] = set()
+        pairs: list[tuple[str, str]] = []
+        seen_days: set[date] = set()
         for listing in listings:
             movies = (
                 _autocomplete_movies(listing, movie_query)
@@ -357,19 +355,14 @@ async def seats_date_autocomplete(
             )
             if not any(movie.showtimes for movie in movies):
                 continue
-            if listing.date in seen:
+            if listing.date in seen_days:
                 continue
             label = _date_choice_label(listing.date, today)
             if needle and needle not in label.casefold().replace(" ", "") and needle not in listing.date.isoformat():
                 continue
-            seen.add(listing.date)
-            days.append(listing.date)
-            if len(days) >= 25:
-                break
-        return [
-            app_commands.Choice(name=_date_choice_label(day, today), value=day.isoformat())
-            for day in days
-        ]
+            seen_days.add(listing.date)
+            pairs.append((label, listing.date.isoformat()))
+        return _unique_choices(pairs)
     except Exception:
         log.exception("seats date autocomplete failed")
         return []
@@ -388,11 +381,10 @@ async def seats_time_autocomplete(
             day = None
         if day is None:
             return []
-        listings = await _seats_listings_for_autocomplete(interaction)
+        listings = _seats_listings_for_autocomplete(interaction)
         movie_query = _namespace_str(getattr(interaction.namespace, "movie", None))
         needle = current.casefold().replace(" ", "")
-        choices: list[app_commands.Choice[str]] = []
-        seen: set[str] = set()
+        pairs: list[tuple[str, str]] = []
         for listing in listings:
             if listing.date != day:
                 continue
@@ -408,16 +400,13 @@ async def seats_time_autocomplete(
                         stamp
                         if show.format_name in {"", "Standard"}
                         else f"{stamp} · {show.format_name}"
-                    )[:100]
-                    if label in seen:
-                        continue
+                    )
                     if needle and needle not in label.casefold().replace(" ", ""):
                         continue
-                    seen.add(label)
-                    choices.append(app_commands.Choice(name=label, value=stamp[:100]))
-                    if len(choices) >= 25:
-                        return choices
-        return choices
+                    # Value must be unique. Two formats at the same clock would
+                    # otherwise both send "7:00 PM" and Discord rejects the list.
+                    pairs.append((label, label))
+        return _unique_choices(pairs)
     except Exception:
         log.exception("seats time autocomplete failed")
         return []
@@ -426,7 +415,25 @@ async def seats_time_autocomplete(
 def _date_choice_label(day: date, today: date) -> str:
     if day == today:
         return f"Today · {day.isoformat()}"[:100]
-    return f"{day:%a %b %-d} · {day.isoformat()}"[:100]
+    return f"{day:%a %b} {day.day} · {day.isoformat()}"[:100]
+
+
+def _unique_choices(pairs: Iterable[tuple[str, str]]) -> list[app_commands.Choice[str]]:
+    """Discord rejects the whole dropdown if any name or value repeats."""
+    choices: list[app_commands.Choice[str]] = []
+    seen_name: set[str] = set()
+    seen_value: set[str] = set()
+    for name, value in pairs:
+        name = " ".join(str(name).split())[:100]
+        value = str(value).strip()[:100]
+        if not name or not value or name in seen_name or value in seen_value:
+            continue
+        seen_name.add(name)
+        seen_value.add(value)
+        choices.append(app_commands.Choice(name=name, value=value))
+        if len(choices) >= 25:
+            break
+    return choices
 
 
 def _autocomplete_movies(listing: TheatreDay, query: str) -> list[MovieListing]:
@@ -444,14 +451,13 @@ def _seats_theatres(interaction: discord.Interaction):
     return list(THEATRES)
 
 
-async def _seats_listings_for_autocomplete(
+def _seats_listings_for_autocomplete(
     interaction: discord.Interaction,
 ) -> list[TheatreDay]:
     """Days to build /seats date and time suggestions from.
 
-    Movies come from the /coming calendar. Dates and times come from the
-    warmed day listings for the chosen theater (or every theater if none
-    is picked yet). An explicit date pins time suggestions to that day.
+    Cache only. Discord kills autocomplete after 3 seconds, so a cold
+    Fandango fetch here is what shows as "Loading options failed".
     """
     bot = interaction.client
     if not isinstance(bot, ShowtimesBot):
@@ -465,9 +471,8 @@ async def _seats_listings_for_autocomplete(
     listings: list[TheatreDay] = []
     for theatre in _seats_theatres(interaction):
         if day is not None:
-            pinned = await bot.amc.listing_for_autocomplete(
-                theatre, day, remaining_only=True, timeout=AUTOCOMPLETE_BUDGET_SECONDS
-            )
+            bot.amc.prime_listing(theatre, day)
+            pinned = bot.amc.cached_listing(theatre, day, remaining_only=True)
             if pinned:
                 listings.append(pinned)
             continue
@@ -475,9 +480,8 @@ async def _seats_listings_for_autocomplete(
         if upcoming:
             listings.extend(upcoming)
             continue
-        today_listing = await bot.amc.listing_for_autocomplete(
-            theatre, None, remaining_only=False, timeout=AUTOCOMPLETE_BUDGET_SECONDS
-        )
+        bot.amc.prime_listing(theatre)
+        today_listing = bot.amc.cached_listing(theatre, remaining_only=False)
         if today_listing:
             listings.append(today_listing)
     listings.sort(key=lambda item: item.date)

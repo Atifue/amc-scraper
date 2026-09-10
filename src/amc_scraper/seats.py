@@ -77,6 +77,8 @@ def parse_clock_query(raw: str) -> time:
 
 def _parse_clock_parts(raw: str) -> tuple[time, bool]:
     text = raw.strip().casefold()
+    # Autocomplete may send "7:30 PM · IMAX"; keep the clock, drop the rest.
+    text = text.split("·")[0].split("|")[0]
     # Drop separators and stray punctuation, but keep the am/pm letters.
     text = re.sub(r"[\s_\-]", "", text)
     text = text.replace("a.m", "am").replace("p.m", "pm")
