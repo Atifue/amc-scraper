@@ -25,10 +25,6 @@ from .theatres import THEATRES, get_theatre
 
 log = logging.getLogger(__name__)
 
-# How far ahead /seats looks for a movie that has not opened yet.
-SEAT_LOOKAHEAD_DAYS = 10
-
-
 class ShowtimeError(RuntimeError):
     pass
 
@@ -197,21 +193,49 @@ class AmcClient:
         self,
         theatre: Theatre | str,
         *,
-        days: int = SEAT_LOOKAHEAD_DAYS,
+        days: int | None = None,
     ) -> list[TheatreDay]:
-        """Warm the upcoming window used by /seats suggestions."""
+        """Warm the same calendar /coming uses, for /seats suggestions."""
         resolved = self._resolve(theatre)
         if resolved is None:
             return []
         start = today_in(resolved.timezone)
-        listings = await self.fetch_schedule_listings(
-            resolved, start, start + timedelta(days=days)
-        )
-        upcoming = sorted(
-            (item for item in listings if item is not None), key=lambda item: item.date
-        )
+        end = start + timedelta(days=days) if days is not None else None
+        await self.fetch_schedule(resolved, start, end)
+        upcoming = self._listings_from_last_good(resolved, start, end)
         self._upcoming[resolved.key] = upcoming
         return upcoming
+
+    def _listings_from_last_good(
+        self,
+        theatre: Theatre,
+        start: date,
+        end: date | None,
+    ) -> list[TheatreDay]:
+        listings: list[TheatreDay] = []
+        for (key, day_iso), listing in self._last_good.items():
+            if key != theatre.key:
+                continue
+            day = date.fromisoformat(day_iso)
+            if day < start or (end is not None and day > end):
+                continue
+            listings.append(listing)
+        listings.sort(key=lambda item: item.date)
+        return listings
+
+    def coming_movies(self, theatre: Theatre | str) -> list[ScheduledMovie]:
+        """Unique titles on the same calendar as /coming, from cache only."""
+        resolved = self._resolve(theatre)
+        if resolved is None:
+            return []
+        start = today_in(resolved.timezone)
+        cached = self._get_schedule_cached(resolved, start, None)
+        if cached is not None:
+            return list(cached.movies)
+        from_days = _aggregate_schedule(
+            [item for item in self.upcoming_listings(resolved, remaining_only=False)]
+        )
+        return from_days
 
     def upcoming_listings(
         self,
@@ -243,12 +267,14 @@ class AmcClient:
         theatre: Theatre | str,
         movie: str,
         show_time: str,
-        day: date | None = None,
+        day: date | str | None = None,
         format_name: str | None = None,
     ) -> tuple[MovieListing, Showtime, SeatMap]:
         if isinstance(theatre, str):
             theatre = get_theatre(theatre)
         clocks = parse_clock_candidates(show_time)
+        if isinstance(day, str):
+            day = date.fromisoformat(day.strip()[:10])
         start = day or today_in(theatre.timezone)
         listing = await self.fetch(theatre, start, remaining_only=True)
         try:
@@ -290,7 +316,7 @@ class AmcClient:
             listings = await self.fetch_schedule_listings(
                 theatre,
                 start + timedelta(days=1),
-                start + timedelta(days=SEAT_LOOKAHEAD_DAYS),
+                None,
             )
             days = sorted(
                 (item for item in listings if item is not None),

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import time as clock
+from datetime import date
 from types import SimpleNamespace
 
 from amc_scraper import bot as botmod
 from amc_scraper.client import AmcClient
 from amc_scraper.config import Settings
-from amc_scraper.fandango import today_in
 from amc_scraper.seats import parse_clock_candidates
 from amc_scraper.theatres import BAY_TERRACE, FRESH_MEADOWS, THEATRES
 
@@ -120,13 +120,35 @@ async def check_dropdowns() -> None:
         ),
     )
 
-    times = await timed(
-        "time, movie picked",
+    empty_times = await timed(
+        "time before date is picked",
         botmod.seats_time_autocomplete(
             FakeInteraction(bot, theater=THEATRE.key, movie=movies[0].value), ""
         ),
     )
-    assert times, "time dropdown blank with a movie picked"
+    assert not empty_times, "time dropdown should wait for a date"
+
+    dates = await timed(
+        "date, movie picked",
+        botmod.seats_date_autocomplete(
+            FakeInteraction(bot, theater=THEATRE.key, movie=movies[0].value), ""
+        ),
+    )
+    assert dates, "date dropdown blank with a movie picked"
+
+    times = await timed(
+        "time, movie and date picked",
+        botmod.seats_time_autocomplete(
+            FakeInteraction(
+                bot,
+                theater=THEATRE.key,
+                movie=movies[0].value,
+                date=dates[0].value,
+            ),
+            "",
+        ),
+    )
+    assert times, "time dropdown blank with movie and date picked"
 
     await timed(
         "time, unparseable date option",
@@ -164,27 +186,42 @@ async def check_upcoming() -> None:
     print(f"  playing today: {'Cars' in ' '.join(today) and 'yes' or 'no'}")
 
     movies = await timed(
-        "movie, typing 'cars', no date",
+        "movie, typing 'cars'",
         botmod.seats_movie_autocomplete(
             FakeInteraction(bot, theater=BAY_TERRACE.key), "cars"
         ),
     )
     assert movies, "upcoming movie missing from the dropdown"
 
-    times = await timed(
-        f"time for {movies[0].value!r}, no date",
-        botmod.seats_time_autocomplete(
+    dates = await timed(
+        f"date for {movies[0].value!r}",
+        botmod.seats_date_autocomplete(
             FakeInteraction(bot, theater=BAY_TERRACE.key, movie=movies[0].value), ""
         ),
     )
-    assert times, "no times offered for the upcoming movie"
+    assert dates, "no dates offered for the upcoming movie"
+
+    times = await timed(
+        f"time for {movies[0].value!r} on {dates[0].value}",
+        botmod.seats_time_autocomplete(
+            FakeInteraction(
+                bot,
+                theater=BAY_TERRACE.key,
+                movie=movies[0].value,
+                date=dates[0].value,
+            ),
+            "",
+        ),
+    )
+    assert times, "no times offered for that date"
 
     movie, show, seat_map = await bot.amc.fetch_seat_map(
-        BAY_TERRACE, movies[0].value, times[0].value
+        BAY_TERRACE, movies[0].value, times[0].value, dates[0].value
     )
-    print(f"  /seats with no date -> {movie.title} on {show.time_local:%a %b %d} "
+    print(f"  /seats movie → date → time -> {movie.title} on {show.time_local:%a %b %d} "
           f"at {show.time_local:%I:%M %p}, {seat_map.available}/{seat_map.total} open")
-    assert show.time_local.date() > today_in(BAY_TERRACE.timezone), "did not roll forward"
+    picked = date.fromisoformat(dates[0].value)
+    assert show.time_local.date() == picked
 
     await asyncio.gather(*bot.amc._inflight.values(), return_exceptions=True)
     await bot.close()
