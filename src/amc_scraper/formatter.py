@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime
 
+from .fandango import today_in
 from .models import MovieListing, ScheduledMovie, Showtime, Theatre, TheatreDay, TheatreSchedule
 from .seats import SeatMap, render_seat_map_summary
 from .watch import WatchedShowtime
@@ -122,9 +123,11 @@ def seat_map_to_embed_payloads(
     show: Showtime,
     seat_map: SeatMap,
 ) -> list[dict]:
-    heading = (
-        f"{theatre.name} — {movie.title} · {_format_clock(show.time_local)}"
-    )
+    when = _format_clock(show.time_local)
+    show_date = show.time_local.date()
+    if show_date != today_in(theatre.timezone):
+        when = f"{show_date:%a %b %-d} · {when}"
+    heading = f"{theatre.name} — {movie.title} · {when}"
     body = render_seat_map_summary(seat_map)
     if show.format_name:
         body = f"{show.format_name}\n{body}"

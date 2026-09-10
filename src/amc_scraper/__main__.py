@@ -67,6 +67,8 @@ def main() -> None:
         except (SeatLookupError, ShowtimeError) as exc:
             raise SystemExit(str(exc)) from exc
         clock = show.time_local.strftime("%I:%M %p").lstrip("0")
+        if show.time_local.date() != today_in(theatres[0].timezone):
+            clock = f"{show.time_local:%a %b %-d} {clock}"
         label = f"{clock} {show.format_name}".strip() if show.format_name else clock
         print(f"{theatres[0].name} — {movie.title} · {label}")
         print(render_seat_map_summary(seat_map).replace("**", ""))

@@ -31,6 +31,8 @@ SEAT_THEATER_CHOICES = [
 AUTOCOMPLETE_REFRESH_MINUTES = 10
 # Discord drops an autocomplete response after 3 seconds.
 AUTOCOMPLETE_BUDGET_SECONDS = 2.0
+# The upcoming window is a multi-day scan, so refresh it far less often.
+UPCOMING_REFRESH_HOURS = 6
 
 
 def _embeds_from_payloads(payloads: list[dict]) -> list[discord.Embed]:
@@ -73,6 +75,7 @@ class ShowtimesBot(commands.Bot):
         self.tree.add_command(coming)
         self.tree.add_command(seats)
         self.refresh_listings.start()
+        self.refresh_upcoming.start()
         guild_id = self.settings.discord_guild_id
         if guild_id:
             guild = discord.Object(id=guild_id)
@@ -97,6 +100,17 @@ class ShowtimesBot(commands.Bot):
                 await self.amc.fetch(theatre, remaining_only=True)
             except Exception:
                 log.warning("Prefetch failed for %s", theatre.key, exc_info=True)
+        await self._refresh_upcoming()
+
+    async def _refresh_upcoming(self) -> None:
+        for index, theatre in enumerate(THEATRES):
+            if index:
+                await asyncio.sleep(self.settings.inter_theatre_delay)
+            try:
+                days = await self.amc.refresh_upcoming(theatre)
+                log.info("Warmed %s upcoming day(s) for %s", len(days), theatre.key)
+            except Exception as exc:
+                log.warning("Upcoming refresh failed for %s: %s", theatre.key, exc)
 
     @tasks.loop(minutes=AUTOCOMPLETE_REFRESH_MINUTES)
     async def refresh_listings(self) -> None:
@@ -115,6 +129,15 @@ class ShowtimesBot(commands.Bot):
 
     @refresh_listings.before_loop
     async def before_refresh_listings(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(hours=UPCOMING_REFRESH_HOURS)
+    async def refresh_upcoming(self) -> None:
+        """Keep the upcoming window warm so /seats can suggest future movies."""
+        await self._refresh_upcoming()
+
+    @refresh_upcoming.before_loop
+    async def before_refresh_upcoming(self) -> None:
         await self.wait_until_ready()
 
     @tasks.loop(time=dt_time(hour=9, minute=0))
@@ -290,18 +313,18 @@ async def seats_movie_autocomplete(
     try:
         listings = await _seats_listings_for_autocomplete(interaction)
         needle = current.casefold()
-        titles: list[str] = []
+        first_day: dict[str, date] = {}
         for listing in listings:
             for movie in listing.movies:
                 if not any(show.buyable for show in movie.showtimes):
                     continue
                 if needle and needle not in movie.title.casefold():
                     continue
-                if movie.title not in titles:
-                    titles.append(movie.title)
+                first_day.setdefault(movie.title, listing.date)
+        today = today_in(THEATRES[0].timezone)
         return [
-            app_commands.Choice(name=title[:100], value=title[:100])
-            for title in titles[:25]
+            app_commands.Choice(name=_dated_label(title, day, today), value=title[:100])
+            for title, day in list(first_day.items())[:25]
         ]
     except Exception:
         log.exception("seats movie autocomplete failed")
@@ -317,6 +340,7 @@ async def seats_time_autocomplete(
         listings = await _seats_listings_for_autocomplete(interaction)
         movie_query = _namespace_str(getattr(interaction.namespace, "movie", None))
         needle = current.casefold().replace(" ", "")
+        today = today_in(THEATRES[0].timezone)
         choices: list[app_commands.Choice[str]] = []
         seen: set[str] = set()
         for listing in listings:
@@ -332,7 +356,8 @@ async def seats_time_autocomplete(
                         stamp
                         if show.format_name in {"", "Standard"}
                         else f"{stamp} · {show.format_name}"
-                    )[:100]
+                    )
+                    label = _dated_label(label, listing.date, today)
                     if label in seen:
                         continue
                     if needle and needle not in label.casefold().replace(" ", ""):
@@ -341,10 +366,20 @@ async def seats_time_autocomplete(
                     choices.append(app_commands.Choice(name=label, value=stamp[:100]))
                     if len(choices) >= 25:
                         return choices
+            # Only suggest the first day this movie is actually on sale, so the
+            # list does not repeat the same times for every upcoming day.
+            if choices and movie_query:
+                break
         return choices
     except Exception:
         log.exception("seats time autocomplete failed")
         return []
+
+
+def _dated_label(text: str, day: date, today: date) -> str:
+    if day == today:
+        return text[:100]
+    return f"{text} · {day:%a %b %-d}"[:100]
 
 
 def _autocomplete_movies(listing: TheatreDay, query: str) -> list[MovieListing]:
@@ -358,9 +393,11 @@ def _autocomplete_movies(listing: TheatreDay, query: str) -> list[MovieListing]:
 async def _seats_listings_for_autocomplete(
     interaction: discord.Interaction,
 ) -> list[TheatreDay]:
-    """Listings to build /seats suggestions from.
+    """Days to build /seats suggestions from.
 
-    With no theater picked yet the suggestions span every theater, so the
+    An explicit date pins the suggestions to that day. Otherwise they run from
+    today through the cached upcoming window, so movies that open later still
+    show up. With no theater picked yet they span every theater, so the
     dropdown is useful no matter which option the user fills in first.
     """
     bot = interaction.client
@@ -373,16 +410,28 @@ async def _seats_listings_for_autocomplete(
         day = None
 
     theatre_key = _namespace_theatre_key(getattr(interaction.namespace, "theater", None))
-    if theatre_key:
-        listing = await bot.amc.listing_for_autocomplete(
-            theatre_key, day, remaining_only=True, timeout=AUTOCOMPLETE_BUDGET_SECONDS
-        )
-        return [listing] if listing else []
+    theatre_keys = [theatre_key] if theatre_key else [item.key for item in THEATRES]
 
-    listings = [
-        bot.amc.cached_listing(theatre, day, remaining_only=True) for theatre in THEATRES
-    ]
-    return [listing for listing in listings if listing]
+    listings: list[TheatreDay] = []
+    for key in theatre_keys:
+        if day is not None:
+            pinned = await bot.amc.listing_for_autocomplete(
+                key, day, remaining_only=True, timeout=AUTOCOMPLETE_BUDGET_SECONDS
+            )
+            if pinned:
+                listings.append(pinned)
+            continue
+        upcoming = bot.amc.upcoming_listings(key, remaining_only=True)
+        if upcoming:
+            listings.extend(upcoming)
+            continue
+        today_listing = await bot.amc.listing_for_autocomplete(
+            key, None, remaining_only=True, timeout=AUTOCOMPLETE_BUDGET_SECONDS
+        )
+        if today_listing:
+            listings.append(today_listing)
+    listings.sort(key=lambda item: item.date)
+    return listings
 
 
 def _namespace_theatre_key(raw: object) -> str | None:

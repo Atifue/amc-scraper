@@ -45,6 +45,14 @@ class SeatLookupError(ValueError):
     pass
 
 
+class MovieNotPlaying(SeatLookupError):
+    """The title is not on the schedule for the requested theater and day."""
+
+
+class NothingOnSale(SeatLookupError):
+    """The title is on the schedule that day, but no showtime is on sale."""
+
+
 def parse_clock_candidates(raw: str) -> tuple[time, ...]:
     """Times a hand-typed query could mean.
 
@@ -113,12 +121,15 @@ def match_buyable_showtime(
     movies = matching_movies(listing.movies, movie_query)
     if not movies:
         known = ", ".join(movie.title for movie in listing.movies[:8]) or "none listed"
-        raise SeatLookupError(f"No movie matching {movie_query!r}. Playing: {known}.")
+        raise MovieNotPlaying(f"No movie matching {movie_query!r}. Playing: {known}.")
     if len(movies) > 1:
         titles = ", ".join(movie.title for movie in movies)
         raise SeatLookupError(f"Movie is ambiguous. Be more specific: {titles}.")
 
     movie = movies[0]
+    if not any(show.buyable and show.showtime_hash for show in movie.showtimes):
+        raise NothingOnSale(_no_showtime_message(movie, None))
+
     wanted = {(item.hour, item.minute) for item in clocks}
     matches = [
         show

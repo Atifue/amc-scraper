@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as time_of_day, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -13,6 +13,8 @@ from .config import Settings
 from .fandango import USER_AGENT, parse_fandango_payload, today_in
 from .models import MovieListing, ScheduledMovie, Showtime, Theatre, TheatreDay, TheatreSchedule
 from .seats import (
+    MovieNotPlaying,
+    NothingOnSale,
     SeatLookupError,
     SeatMap,
     match_buyable_showtime,
@@ -22,6 +24,9 @@ from .seats import (
 from .theatres import THEATRES, get_theatre
 
 log = logging.getLogger(__name__)
+
+# How far ahead /seats looks for a movie that has not opened yet.
+SEAT_LOOKAHEAD_DAYS = 10
 
 
 class ShowtimeError(RuntimeError):
@@ -45,6 +50,9 @@ class AmcClient:
         # short-lived TTL cache goes cold.
         self._last_good: dict[tuple[str, str], TheatreDay] = {}
         self._inflight: dict[tuple[str, str], asyncio.Task[TheatreDay]] = {}
+        # Upcoming days per theatre, so /seats can suggest movies that have not
+        # opened yet. Warmed in the background; reads never hit the network.
+        self._upcoming: dict[str, list[TheatreDay]] = {}
         self._cookies = httpx.Cookies()
         self._warmed: set[str] = set()
 
@@ -185,6 +193,51 @@ class AmcClient:
             )
         return listings
 
+    async def refresh_upcoming(
+        self,
+        theatre: Theatre | str,
+        *,
+        days: int = SEAT_LOOKAHEAD_DAYS,
+    ) -> list[TheatreDay]:
+        """Warm the upcoming window used by /seats suggestions."""
+        resolved = self._resolve(theatre)
+        if resolved is None:
+            return []
+        start = today_in(resolved.timezone)
+        listings = await self.fetch_schedule_listings(
+            resolved, start, start + timedelta(days=days)
+        )
+        upcoming = sorted(
+            (item for item in listings if item is not None), key=lambda item: item.date
+        )
+        self._upcoming[resolved.key] = upcoming
+        return upcoming
+
+    def upcoming_listings(
+        self,
+        theatre: Theatre | str,
+        *,
+        remaining_only: bool = True,
+    ) -> list[TheatreDay]:
+        """Today onward, from cache only. Empty until the window is warmed."""
+        resolved = self._resolve(theatre)
+        if resolved is None:
+            return []
+        today = today_in(resolved.timezone)
+        by_date: dict[date, TheatreDay] = {}
+        for listing in self._upcoming.get(resolved.key, []):
+            if listing.date >= today:
+                by_date[listing.date] = self._filter(listing, remaining_only)
+        # Today's listing is refreshed far more often than the window is.
+        fresh_today = self.cached_listing(resolved, today, remaining_only=remaining_only)
+        if fresh_today is not None:
+            by_date[today] = fresh_today
+        return [
+            by_date[key]
+            for key in sorted(by_date)
+            if any(movie.showtimes for movie in by_date[key].movies)
+        ]
+
     async def fetch_seat_map(
         self,
         theatre: Theatre | str,
@@ -196,10 +249,22 @@ class AmcClient:
         if isinstance(theatre, str):
             theatre = get_theatre(theatre)
         clocks = parse_clock_candidates(show_time)
-        listing = await self.fetch(theatre, day, remaining_only=True)
-        movie_listing, show = match_buyable_showtime(
-            listing, movie, clocks, format_name
-        )
+        start = day or today_in(theatre.timezone)
+        listing = await self.fetch(theatre, start, remaining_only=True)
+        try:
+            movie_listing, show = match_buyable_showtime(
+                listing, movie, clocks, format_name
+            )
+        except (MovieNotPlaying, NothingOnSale):
+            # The title is not on sale that day. With no explicit date the user
+            # most likely means the next date it plays, which is how the
+            # suggestions are labelled.
+            if day is not None:
+                raise
+            ahead = await self._match_upcoming(theatre, movie, clocks, format_name, start)
+            if ahead is None:
+                raise
+            movie_listing, show = ahead
         if not show.showtime_hash:
             raise SeatLookupError(
                 "That showtime is not on sale yet, so Fandango has no seat map."
@@ -211,6 +276,32 @@ class AmcClient:
                 f"Fandango seat map failed (HTTP {exc.response.status_code})"
             ) from exc
         return movie_listing, show, parse_seat_map(payload)
+
+    async def _match_upcoming(
+        self,
+        theatre: Theatre,
+        movie: str,
+        clocks: tuple[time_of_day, ...],
+        format_name: str | None,
+        start: date,
+    ) -> tuple[MovieListing, Showtime] | None:
+        days = [item for item in self.upcoming_listings(theatre) if item.date > start]
+        if not days:
+            listings = await self.fetch_schedule_listings(
+                theatre,
+                start + timedelta(days=1),
+                start + timedelta(days=SEAT_LOOKAHEAD_DAYS),
+            )
+            days = sorted(
+                (item for item in listings if item is not None),
+                key=lambda item: item.date,
+            )
+        for listing in days:
+            try:
+                return match_buyable_showtime(listing, movie, clocks, format_name)
+            except SeatLookupError:
+                continue
+        return None
 
     async def _fetch_seat_payload(self, theatre: Theatre, showtime_hash: str) -> dict:
         url = f"https://www.fandango.com/napi/seatMap/{showtime_hash}"

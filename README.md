@@ -108,12 +108,12 @@ Read-only Fandango seat map for a showtime that is **already on sale**. This is 
 | `theater` | One theater (required) |
 | `movie` | Title, or enough of it to match |
 | `time` | Clock time — `7:30 PM`, `730pm`, `7pm`, and `19:30` all work |
-| `date` | `YYYY-MM-DD` (defaults to today) |
+| `date` | `YYYY-MM-DD` (optional — omit to use today, or the next day that movie is on sale) |
 | `format` | Optional, if two screens share the same time (`IMAX`) |
 
 The `movie` and `time` dropdowns are suggestions, not requirements — typing either one by hand works. A bare time like `7:30` resolves to the evening show unless both readings are on sale, in which case the bot asks for AM or PM.
 
-Suggestions come from today's cached listings, which the bot keeps warm in the background, so the dropdown answers instantly instead of waiting on Fandango. Once every showtime for the day has started, there is nothing left to suggest; pass `date` to look at another day.
+Suggestions cover **today plus the next ~10 days** of on-sale showtimes. Titles that open later are labeled with that day (`Cars: 20th Anniversary · Thu Sep 10`). Leave `date` blank and `/seats` rolls forward to the next day that movie is buyable.
 
 If tickets are not on sale yet (Lincoln Square Dune-style placeholders), Fandango has no map and the command says so.
 

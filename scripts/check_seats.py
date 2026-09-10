@@ -1,4 +1,4 @@
-"""Reproduce and verify the fix for issue #1 (/seats dropdown goes blank).
+"""Verify /seats autocomplete: warm cache, blank-after-TTL, and upcoming movies.
 
 Hits live Fandango data:
 
@@ -14,8 +14,9 @@ from types import SimpleNamespace
 from amc_scraper import bot as botmod
 from amc_scraper.client import AmcClient
 from amc_scraper.config import Settings
+from amc_scraper.fandango import today_in
 from amc_scraper.seats import parse_clock_candidates
-from amc_scraper.theatres import FRESH_MEADOWS, THEATRES
+from amc_scraper.theatres import BAY_TERRACE, FRESH_MEADOWS, THEATRES
 
 THEATRE = FRESH_MEADOWS
 
@@ -145,9 +146,54 @@ async def check_dropdowns() -> None:
     await bot.close()
 
 
+async def check_upcoming() -> None:
+    """A movie that opens later should still be pickable (issue: Cars @ Bay Terrace)."""
+    print("upcoming movies")
+    settings = Settings.from_env(require_discord=False)
+    bot = botmod.ShowtimesBot.__new__(botmod.ShowtimesBot)
+    botmod.commands.Bot.__init__(
+        bot, command_prefix="!", intents=botmod.discord.Intents.default()
+    )
+    bot.settings = settings
+    bot.amc = AmcClient(settings)
+
+    warmed = await bot.amc.refresh_upcoming(BAY_TERRACE)
+    print(f"  warmed {len(warmed)} upcoming days for {BAY_TERRACE.name}")
+
+    today = [m.title for m in (await bot.amc.fetch(BAY_TERRACE)).movies]
+    print(f"  playing today: {'Cars' in ' '.join(today) and 'yes' or 'no'}")
+
+    movies = await timed(
+        "movie, typing 'cars', no date",
+        botmod.seats_movie_autocomplete(
+            FakeInteraction(bot, theater=BAY_TERRACE.key), "cars"
+        ),
+    )
+    assert movies, "upcoming movie missing from the dropdown"
+
+    times = await timed(
+        f"time for {movies[0].value!r}, no date",
+        botmod.seats_time_autocomplete(
+            FakeInteraction(bot, theater=BAY_TERRACE.key, movie=movies[0].value), ""
+        ),
+    )
+    assert times, "no times offered for the upcoming movie"
+
+    movie, show, seat_map = await bot.amc.fetch_seat_map(
+        BAY_TERRACE, movies[0].value, times[0].value
+    )
+    print(f"  /seats with no date -> {movie.title} on {show.time_local:%a %b %d} "
+          f"at {show.time_local:%I:%M %p}, {seat_map.available}/{seat_map.total} open")
+    assert show.time_local.date() > today_in(BAY_TERRACE.timezone), "did not roll forward"
+
+    await asyncio.gather(*bot.amc._inflight.values(), return_exceptions=True)
+    await bot.close()
+
+
 async def main() -> None:
     await check_client()
     await check_dropdowns()
+    await check_upcoming()
     print("OK")
 
 
